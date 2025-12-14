@@ -1,0 +1,43 @@
+# Environment and secrets
+.env
+*.tok
+github.tok
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+venv/
+.venv/
+env/
+.Python
+pip-log.txt
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Output directories
+test_out/
+output/
+*.log
+
+# Models (large files)
+models/rdd/*.pt
+models/*.pt
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+
+# SAM3 submodule
+sam3/

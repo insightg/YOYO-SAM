@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SAM3 Object Detection</title>
+    <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+    <div class="container">
+        <!-- Left Sidebar - Image List -->
+        <aside class="sidebar-left" id="sidebar-left">
+            <div class="sidebar-header">
+                <h3>Images</h3>
+                <button id="view-toggle" class="view-toggle" title="Switch to thumbnail view">⊞</button>
+                <span id="image-count">Loading...</span>
+            </div>
+            <div class="search-box">
+                <input type="text" id="search-input" placeholder="Search images...">
+            </div>
+            <div class="image-list" id="image-list">
+                <!-- Image list will be loaded here -->
+            </div>
+            <div class="thumbnails" id="thumbnails" style="display: none;">
+                <!-- Thumbnails will be loaded here (toggle view) -->
+            </div>
+            <div class="load-more">
+                <button id="load-more-btn" style="display: none;">Load More</button>
+            </div>
+            <div class="resize-handle" id="resize-left"></div>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="content">
+            <div class="image-container" id="image-container">
+                <div class="placeholder" id="placeholder">
+                    <p>Select an image from the left sidebar</p>
+                </div>
+                <img id="main-image" style="display: none;">
+                <canvas id="overlay"></canvas>
+            </div>
+            <div class="image-info" id="image-info" style="display: none;">
+                <span id="current-image-name"></span>
+                <span id="current-image-size"></span>
+            </div>
+            <div class="detections-panel" id="detections-panel" style="display: none;">
+                <h4>Detections <span id="detection-count">(0)</span></h4>
+                <div class="detections-list" id="detections-list">
+                    <!-- Detections will be listed here -->
+                </div>
+            </div>
+        </main>
+
+        <!-- Right Sidebar - Controls -->
+        <aside class="sidebar-right" id="sidebar-right">
+            <div class="resize-handle" id="resize-right"></div>
+            <div class="sidebar-header">
+                <h3>Parameters</h3>
+            </div>
+
+            <div class="control-group">
+                <label for="confidence">Global Confidence Filter</label>
+                <div class="slider-container">
+                    <input type="range" id="confidence" min="0.1" max="0.9" step="0.05" value="0.3">
+                    <span id="confidence-value">0.3</span>
+                </div>
+                <small class="slider-hint">Default threshold for all classes</small>
+            </div>
+
+            <div class="control-group class-thresholds-group" id="class-thresholds-group" style="display: none;">
+                <label>Per-Class Thresholds <button id="reset-thresholds-btn" class="reset-btn">Reset</button></label>
+                <div class="class-thresholds" id="class-thresholds">
+                    <!-- Per-class sliders will be added here -->
+                </div>
+            </div>
+
+            <div class="control-group">
+                <label for="tiles">Tiles</label>
+                <select id="tiles">
+                    <option value="0">No tiles (small images)</option>
+                    <option value="6">6 tiles (2x3)</option>
+                    <option value="12">12 tiles (3x4)</option>
+                    <option value="24" selected>24 tiles (4x6) - Recommended</option>
+                </select>
+            </div>
+
+            <div class="control-group">
+                <label>Saved Lists</label>
+                <div class="list-controls">
+                    <select id="class-list-select">
+                        <option value="">-- Select a list --</option>
+                    </select>
+                    <button id="load-list-btn" class="icon-btn" title="Load selected list">Load</button>
+                </div>
+                <div class="list-actions">
+                    <button id="save-list-btn" class="action-btn save" title="Save current classes">Save</button>
+                    <button id="new-list-btn" class="action-btn new" title="Create new list">New</button>
+                    <button id="delete-list-btn" class="action-btn delete" title="Delete selected list">Delete</button>
+                </div>
+            </div>
+
+            <div class="control-group classes-group">
+                <label for="classes">Classes (one per line) <small class="deep-hint">"- deep" = LLM | "- local" = GTSRB</small></label>
+                <textarea id="classes" rows="15">road sign - local
+yield sign
+speed limit sign
+traffic light
+street light pole
+light pole
+manhole cover
+road marking
+crosswalk
+pedestrian crossing
+no parking sign
+one way sign
+road sign
+parking sign
+fire hydrant
+traffic cone
+road barrier
+guardrail
+curb
+sidewalk</textarea>
+            </div>
+
+            <div class="button-group">
+                <button id="detect-btn" class="detect-button" disabled>
+                    DETECT
+                </button>
+                <button id="save-btn" class="save-button" disabled>
+                    SAVE IMAGE
+                </button>
+                <button id="export-btn" class="export-button" disabled>
+                    EXPORT CSV
+                </button>
+            </div>
+
+            <div class="model-status" id="model-status">
+                <span class="status-indicator"></span>
+                <span class="status-text">Model: checking...</span>
+            </div>
+        </aside>
+    </div>
+
+    <!-- Loading Overlay -->
+    <div class="loading-overlay" id="loading-overlay" style="display: none;">
+        <div class="loading-content">
+            <div class="spinner"></div>
+            <p id="loading-text">Processing image...</p>
+            <div class="progress-container">
+                <div class="progress-bar" id="progress-bar">
+                    <div class="progress-fill" id="progress-fill"></div>
+                </div>
+                <span class="progress-percent" id="progress-percent">0%</span>
+            </div>
+            <p class="loading-detail" id="loading-detail"></p>
+            <p class="loading-hint">This may take 1-2 minutes for large images</p>
+        </div>
+    </div>
+
+    <!-- Detection Detail Modal -->
+    <div class="modal-overlay" id="detection-modal" style="display: none;">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 id="modal-title">Detection</h3>
+                <button class="modal-close" id="modal-close">&times;</button>
+            </div>
+            <div class="modal-body">
+                <canvas id="modal-canvas"></canvas>
+            </div>
+            <div class="modal-footer">
+                <span id="modal-info"></span>
+            </div>
+        </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+</body>
+</html>

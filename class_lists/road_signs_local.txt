@@ -1,0 +1,16 @@
+road sign - local
+speed limit sign - local
+traffic sign - local
+stop sign
+yield sign
+street light pole
+light pole
+manhole cover
+crosswalk
+pedestrian crossing
+fire hydrant
+traffic cone
+road barrier
+guardrail
+curb
+sidewalk

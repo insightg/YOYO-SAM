@@ -1,0 +1,20 @@
+road sign - deep
+speed limit sign - deep
+traffic light - deep
+stop sign
+yield sign
+street light pole
+light pole
+manhole cover
+road marking - deep
+crosswalk
+pedestrian crossing
+no parking sign
+one way sign
+parking sign
+fire hydrant
+traffic cone
+road barrier
+guardrail
+curb
+sidewalk
