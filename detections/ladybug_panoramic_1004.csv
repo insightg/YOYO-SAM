@@ -1,0 +1,9 @@
+id,image,class,original_class,score,bbox_x1,bbox_y1,bbox_x2,bbox_y2,bbox_width,bbox_height,gps_lat,gps_lon,camera_lat,camera_lon,camera_heading,deep_analyzed,local_analyzed,local_confidence
+,ladybug_panoramic_1004.jpg,road_sign.passaggio_obbligatorio_destra,road sign,0.8398,2667,4152,2725,4226,57,73,,,,,326.3,false,true,0.9583
+,ladybug_panoramic_1004.jpg,road_sign.direzione_obbligatoria_sinistra,road sign,0.8086,7309,3910,7354,3955,45,44,,,,,326.3,false,true,0.5931
+,ladybug_panoramic_1004.jpg,road_sign.passaggio_obbligatorio_destra,road sign,0.8086,4921,4120,4982,4180,60,60,,,,,326.3,false,true,0.8176
+,ladybug_panoramic_1004.jpg,road_sign.strada_prioritaria,road sign,0.8047,559,3915,613,3972,54,56,,,,,326.3,false,true,0.3946
+,ladybug_panoramic_1004.jpg,pothole.non_identificabile,pothole,0.4863,4787,5007,5537,5283,749,275,,,,,326.3,false,true,
+,ladybug_panoramic_1004.jpg,pothole.non_identificabile,pothole,0.4648,5744,4739,6283,4897,539,158,,,,,326.3,false,true,
+,ladybug_panoramic_1004.jpg,pothole.non_identificabile,pothole,0.4473,6272,4571,6590,4658,318,87,,,,,326.3,false,true,
+,ladybug_panoramic_1004.jpg,road_crack.tipo_Longitudinal Crack,road crack,0.4473,12853,5587,13077,5925,223,338,,,,,326.3,false,true,0.4004

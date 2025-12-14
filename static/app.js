@@ -34,7 +34,7 @@ const detectionsList = document.getElementById('detections-list');
 const detectionCount = document.getElementById('detection-count');
 const confidenceSlider = document.getElementById('confidence');
 const confidenceValue = document.getElementById('confidence-value');
-const tilesSelect = document.getElementById('tiles');
+// tiles is automatic (24 is default, backend calculates optimal)
 const classesTextarea = document.getElementById('classes');
 const detectBtn = document.getElementById('detect-btn');
 const loadingOverlay = document.getElementById('loading-overlay');
@@ -55,6 +55,9 @@ const exportBtn = document.getElementById('export-btn');
 const classThresholdsGroup = document.getElementById('class-thresholds-group');
 const classThresholdsContainer = document.getElementById('class-thresholds');
 const resetThresholdsBtn = document.getElementById('reset-thresholds-btn');
+const saveThresholdsBtn = document.getElementById('save-thresholds-btn');
+
+let savedDefaultThresholds = {};  // Loaded from server at startup
 
 // Color palette for detections
 const COLORS = [
@@ -68,6 +71,7 @@ document.addEventListener('DOMContentLoaded', () => {
     loadImages();
     checkModelStatus();
     loadClassLists();
+    loadDefaultThresholds();  // Load saved threshold defaults
     setupEventListeners();
     setupResizableSidebars();
 });
@@ -101,14 +105,17 @@ function setupEventListeners() {
     newListBtn.addEventListener('click', createNewList);
     deleteListBtn.addEventListener('click', deleteSelectedList);
 
-    // Save image button
-    saveImageBtn.addEventListener('click', saveImageWithDetections);
+    // Save button (CSV)
+    saveImageBtn.addEventListener('click', saveDetectionsCSV);
 
     // Export CSV button
     exportBtn.addEventListener('click', exportDetectionsCSV);
 
     // Reset per-class thresholds
     resetThresholdsBtn.addEventListener('click', resetClassThresholds);
+
+    // Save thresholds as defaults
+    saveThresholdsBtn.addEventListener('click', saveDefaultThresholds);
 
     // Modal close handlers
     modalClose.addEventListener('click', closeModal);
@@ -338,7 +345,7 @@ async function selectImage(imageName) {
     mainImage.style.display = 'block';
     placeholder.style.display = 'none';
 
-    mainImage.onload = () => {
+    mainImage.onload = async () => {
         // Update image info display
         imageInfo.style.display = 'flex';
         currentImageName.textContent = imageName;
@@ -354,7 +361,37 @@ async function selectImage(imageName) {
 
         // Setup overlay
         setupOverlay();
+
+        // Load saved detections if exist
+        await loadSavedDetections(imageName);
     };
+}
+
+// Load saved detections from CSV if exists
+async function loadSavedDetections(imageName) {
+    try {
+        const response = await fetch(`/api/load-detections/${encodeURIComponent(imageName)}`);
+        const data = await response.json();
+
+        if (data.exists && data.detections.length > 0) {
+            allDetections = data.detections;
+            cameraInfo = data.camera;
+
+            // Apply saved default thresholds
+            applyDefaultThresholds();
+
+            // Build threshold UI and display
+            buildClassThresholdsUI();
+            filterAndDisplayDetections();
+
+            // Show detections panel
+            detectionsPanel.style.display = 'flex';
+
+            console.log(`Loaded ${allDetections.length} saved detections for ${imageName}`);
+        }
+    } catch (error) {
+        console.error('Error loading saved detections:', error);
+    }
 }
 
 function setupOverlay() {
@@ -408,62 +445,117 @@ function filterAndDisplayDetections() {
 }
 
 function buildClassThresholdsUI() {
-    // Get unique classes from all detections
-    const classCounts = {};
+    // Group subclasses by parent class (original_class)
+    const parentClasses = {};  // { parentClass: [subclass1, subclass2, ...] }
+    const classCounts = {};    // { class: count }
+
     allDetections.forEach(d => {
-        classCounts[d.class] = (classCounts[d.class] || 0) + 1;
+        const parent = d.original_class || d.class;
+        const subclass = d.class;
+
+        if (!parentClasses[parent]) {
+            parentClasses[parent] = new Set();
+        }
+        parentClasses[parent].add(subclass);
+        classCounts[subclass] = (classCounts[subclass] || 0) + 1;
     });
 
-    const classes = Object.keys(classCounts).sort();
-    if (classes.length === 0) {
+    const parents = Object.keys(parentClasses).sort();
+    if (parents.length === 0) {
         classThresholdsGroup.style.display = 'none';
         return;
     }
 
-    // Get colors for classes
-    const classColors = {};
-    classes.forEach((cls, i) => {
-        classColors[cls] = COLORS[i % COLORS.length];
+    // Assign colors to parent classes
+    const parentColors = {};
+    parents.forEach((p, i) => {
+        parentColors[p] = COLORS[i % COLORS.length];
     });
 
     const globalThreshold = parseFloat(confidenceSlider.value);
-
     classThresholdsContainer.innerHTML = '';
 
-    classes.forEach(cls => {
-        const threshold = classThresholds[cls] !== undefined ? classThresholds[cls] : globalThreshold;
-        const totalCount = classCounts[cls];
-        const filteredCount = allDetections.filter(d => d.class === cls && d.score >= threshold).length;
+    parents.forEach(parent => {
+        const subclasses = [...parentClasses[parent]].sort();
+        const parentTotal = subclasses.reduce((sum, sc) => sum + (classCounts[sc] || 0), 0);
+        const parentThreshold = classThresholds[`__parent__${parent}`] !== undefined
+            ? classThresholds[`__parent__${parent}`]
+            : globalThreshold;
 
-        const item = document.createElement('div');
-        item.className = 'class-threshold-item';
-        item.innerHTML = `
-            <div class="class-threshold-color" style="background: ${classColors[cls]}"></div>
-            <span class="class-threshold-name" title="${cls}">${cls}</span>
-            <input type="range" class="class-threshold-slider" data-class="${cls}"
-                   min="0.1" max="0.9" step="0.05" value="${threshold}">
-            <span class="class-threshold-value">${threshold.toFixed(2)}</span>
-            <span class="class-threshold-count">${filteredCount}/${totalCount}</span>
+        // Parent class slider
+        const parentItem = document.createElement('div');
+        parentItem.className = 'class-threshold-item parent-class';
+        parentItem.innerHTML = `
+            <div class="class-threshold-color" style="background: ${parentColors[parent]}"></div>
+            <span class="class-threshold-name" title="${parent}">${parent}</span>
+            <input type="range" class="class-threshold-slider parent-slider" data-parent="${parent}"
+                   min="0.1" max="0.9" step="0.05" value="${parentThreshold}">
+            <span class="class-threshold-value">${parentThreshold.toFixed(2)}</span>
+            <span class="class-threshold-count">${parentTotal}</span>
         `;
 
-        const slider = item.querySelector('.class-threshold-slider');
-        const valueSpan = item.querySelector('.class-threshold-value');
-        const countSpan = item.querySelector('.class-threshold-count');
+        const parentSlider = parentItem.querySelector('.parent-slider');
+        const parentValueSpan = parentItem.querySelector('.class-threshold-value');
 
-        slider.addEventListener('input', (e) => {
+        parentSlider.addEventListener('input', (e) => {
             const newThreshold = parseFloat(e.target.value);
-            classThresholds[cls] = newThreshold;
-            valueSpan.textContent = newThreshold.toFixed(2);
+            classThresholds[`__parent__${parent}`] = newThreshold;
+            parentValueSpan.textContent = newThreshold.toFixed(2);
 
-            // Update count
-            const newFilteredCount = allDetections.filter(d => d.class === cls && d.score >= newThreshold).length;
-            countSpan.textContent = `${newFilteredCount}/${totalCount}`;
+            // Update all subclass sliders
+            subclasses.forEach(sc => {
+                classThresholds[sc] = newThreshold;
+                const scSlider = classThresholdsContainer.querySelector(`.class-threshold-slider[data-class="${sc}"]`);
+                if (scSlider) {
+                    scSlider.value = newThreshold;
+                    scSlider.closest('.class-threshold-item').querySelector('.class-threshold-value').textContent = newThreshold.toFixed(2);
+                    const total = classCounts[sc] || 0;
+                    const filtered = allDetections.filter(d => d.class === sc && d.score >= newThreshold).length;
+                    scSlider.closest('.class-threshold-item').querySelector('.class-threshold-count').textContent = `${filtered}/${total}`;
+                }
+            });
 
-            // Re-filter and display
             filterAndDisplayDetectionsNoRebuild();
         });
 
-        classThresholdsContainer.appendChild(item);
+        classThresholdsContainer.appendChild(parentItem);
+
+        // Subclass sliders (only if more than one subclass or subclass differs from parent)
+        if (subclasses.length > 1 || (subclasses.length === 1 && subclasses[0] !== parent)) {
+            subclasses.forEach(sc => {
+                const threshold = classThresholds[sc] !== undefined ? classThresholds[sc] : globalThreshold;
+                const totalCount = classCounts[sc] || 0;
+                const filteredCount = allDetections.filter(d => d.class === sc && d.score >= threshold).length;
+
+                const item = document.createElement('div');
+                item.className = 'class-threshold-item subclass';
+                item.innerHTML = `
+                    <div class="class-threshold-color" style="background: ${parentColors[parent]}; opacity: 0.6"></div>
+                    <span class="class-threshold-name subclass-name" title="${sc}">${sc.includes('.') ? sc.split('.').pop() : sc}</span>
+                    <input type="range" class="class-threshold-slider" data-class="${sc}"
+                           min="0.1" max="0.9" step="0.05" value="${threshold}">
+                    <span class="class-threshold-value">${threshold.toFixed(2)}</span>
+                    <span class="class-threshold-count">${filteredCount}/${totalCount}</span>
+                `;
+
+                const slider = item.querySelector('.class-threshold-slider');
+                const valueSpan = item.querySelector('.class-threshold-value');
+                const countSpan = item.querySelector('.class-threshold-count');
+
+                slider.addEventListener('input', (e) => {
+                    const newThreshold = parseFloat(e.target.value);
+                    classThresholds[sc] = newThreshold;
+                    valueSpan.textContent = newThreshold.toFixed(2);
+
+                    const newFilteredCount = allDetections.filter(d => d.class === sc && d.score >= newThreshold).length;
+                    countSpan.textContent = `${newFilteredCount}/${totalCount}`;
+
+                    filterAndDisplayDetectionsNoRebuild();
+                });
+
+                classThresholdsContainer.appendChild(item);
+            });
+        }
     });
 
     classThresholdsGroup.style.display = 'block';
@@ -520,6 +612,55 @@ function resetClassThresholds() {
     filterAndDisplayDetections();
 }
 
+// Save current thresholds as defaults
+async function saveDefaultThresholds() {
+    try {
+        const response = await fetch('/api/thresholds', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ thresholds: classThresholds })
+        });
+
+        if (!response.ok) throw new Error('Failed to save thresholds');
+
+        savedDefaultThresholds = { ...classThresholds };
+        saveThresholdsBtn.textContent = '✓';
+        setTimeout(() => { saveThresholdsBtn.textContent = '💾'; }, 1500);
+
+        console.log('Saved default thresholds:', Object.keys(classThresholds).length);
+    } catch (error) {
+        console.error('Error saving thresholds:', error);
+        alert('Error saving thresholds: ' + error.message);
+    }
+}
+
+// Load saved default thresholds from server
+async function loadDefaultThresholds() {
+    try {
+        const response = await fetch('/api/thresholds');
+        const data = await response.json();
+        savedDefaultThresholds = data.thresholds || {};
+        console.log('Loaded default thresholds:', Object.keys(savedDefaultThresholds).length);
+    } catch (error) {
+        console.error('Error loading thresholds:', error);
+    }
+}
+
+// Apply saved default thresholds to current detection
+function applyDefaultThresholds() {
+    if (Object.keys(savedDefaultThresholds).length === 0) return;
+
+    // Apply saved thresholds for classes that exist in current detection
+    const allClasses = new Set(allDetections.map(d => d.class));
+    const allParents = new Set(allDetections.map(d => d.original_class || d.class));
+
+    for (const [cls, threshold] of Object.entries(savedDefaultThresholds)) {
+        if (allClasses.has(cls) || allParents.has(cls) || cls.startsWith('__parent__')) {
+            classThresholds[cls] = threshold;
+        }
+    }
+}
+
 // DOM Elements for progress
 const progressFill = document.getElementById('progress-fill');
 const progressPercent = document.getElementById('progress-percent');
@@ -557,7 +698,7 @@ async function runDetection() {
         return;
     }
 
-    const tiles = parseInt(tilesSelect.value);
+    const tiles = 24;  // Fixed, backend calculates optimal tiling
     // Always request with low confidence (0.1) to get all possible detections
     // Then filter client-side based on slider
     const apiConfidence = 0.1;
@@ -589,6 +730,9 @@ async function runDetection() {
         allDetections = data.detections;
         cameraInfo = data.camera;
         classThresholds = {};  // Reset per-class thresholds for new detection
+
+        // Apply saved default thresholds for known classes
+        applyDefaultThresholds();
 
         // Build per-class threshold UI
         buildClassThresholdsUI();
@@ -648,17 +792,17 @@ function drawDetections() {
     const scaleX = overlay.width / currentImageInfo.width;
     const scaleY = overlay.height / currentImageInfo.height;
 
-    // Group by class for colors (use original_class for deep analyzed)
-    const classColors = {};
-    const uniqueClasses = [...new Set(detections.map(d => d.original_class || d.class))];
-    uniqueClasses.forEach((cls, i) => {
-        classColors[cls] = COLORS[i % COLORS.length];
+    // Assign colors by parent class (original_class), sorted for consistency
+    const parentColors = {};
+    const parentClasses = [...new Set(allDetections.map(d => d.original_class || d.class))].sort();
+    parentClasses.forEach((cls, i) => {
+        parentColors[cls] = COLORS[i % COLORS.length];
     });
 
     detections.forEach((det, index) => {
         const [x1, y1, x2, y2] = det.bbox;
         const colorKey = det.original_class || det.class;
-        const color = classColors[colorKey];
+        const color = parentColors[colorKey];
 
         // Scale coordinates
         const sx1 = x1 * scaleX;
@@ -708,11 +852,11 @@ function showDetectionsList() {
         return;
     }
 
-    // Group by class for colors (use original_class for deep analyzed)
-    const classColors = {};
-    const uniqueClasses = [...new Set(detections.map(d => d.original_class || d.class))];
-    uniqueClasses.forEach((cls, i) => {
-        classColors[cls] = COLORS[i % COLORS.length];
+    // Assign colors by parent class (original_class), sorted for consistency
+    const parentColors = {};
+    const parentClasses = [...new Set(allDetections.map(d => d.original_class || d.class))].sort();
+    parentClasses.forEach((cls, i) => {
+        parentColors[cls] = COLORS[i % COLORS.length];
     });
 
     detections.forEach((det, index) => {
@@ -735,12 +879,12 @@ function showDetectionsList() {
             analysisBadge = `<span class="detection-local" title="Analyzed by GTSRB model${localConf}">GTSRB</span>`;
         }
 
-        // Display class name (shortened if too long)
-        const displayClass = det.class.length > 25 ? det.class.substring(0, 22) + '...' : det.class;
+        // Display class name (full, CSS handles overflow)
+        const displayClass = det.class;
         const colorKey = det.original_class || det.class;
 
         item.innerHTML = `
-            <div class="detection-color" style="background: ${classColors[colorKey]}"></div>
+            <div class="detection-color" style="background: ${parentColors[colorKey]}"></div>
             <span class="detection-class" title="${det.class}">${displayClass}</span>
             ${analysisBadge}
             ${gpsInfo}
@@ -937,41 +1081,78 @@ async function deleteSelectedList() {
 }
 
 // Save Image with Detections
-async function saveImageWithDetections() {
+async function saveDetectionsCSV() {
     if (!currentImage || detections.length === 0) {
         alert('No detections to save');
         return;
     }
 
-    const threshold = parseFloat(confidenceSlider.value);
-
     try {
         saveImageBtn.disabled = true;
         saveImageBtn.textContent = 'SAVING...';
 
-        const response = await fetch('/api/save-image', {
+        // Save to server
+        const response = await fetch('/api/save-detections', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 image_name: currentImage,
                 detections: detections,
-                confidence_threshold: threshold
+                camera: cameraInfo
             })
         });
 
         if (!response.ok) {
-            throw new Error('Failed to save image');
+            throw new Error('Failed to save to server');
         }
 
         const data = await response.json();
-        alert(`Image saved to:\ntest_out/${data.output_name}\n\n${data.detections_count} detections drawn`);
+        console.log(`Saved ${data.detections_count} detections to ${data.csv_path}`);
+
+        // Also download locally
+        const headers = [
+            'id', 'image', 'class', 'original_class', 'score',
+            'bbox_x1', 'bbox_y1', 'bbox_x2', 'bbox_y2', 'bbox_width', 'bbox_height',
+            'gps_lat', 'gps_lon', 'camera_lat', 'camera_lon', 'camera_heading',
+            'deep_analyzed', 'local_analyzed', 'local_confidence'
+        ];
+
+        const rows = detections.map((det, idx) => {
+            const [x1, y1, x2, y2] = det.bbox;
+            return [
+                det.id || (idx + 1),
+                currentImage,
+                det.class || '',
+                det.original_class || '',
+                det.score?.toFixed(4) || '',
+                Math.round(x1), Math.round(y1), Math.round(x2), Math.round(y2),
+                Math.round(x2 - x1), Math.round(y2 - y1),
+                det.gps?.lat?.toFixed(6) || '',
+                det.gps?.lon?.toFixed(6) || '',
+                cameraInfo?.lat?.toFixed(6) || '',
+                cameraInfo?.lon?.toFixed(6) || '',
+                cameraInfo?.heading?.toFixed(1) || '',
+                det.deep_analyzed ? 'true' : 'false',
+                det.local_analyzed ? 'true' : 'false',
+                det.local_confidence?.toFixed(4) || ''
+            ];
+        });
+
+        const csvContent = [headers.join(','), ...rows.map(r => r.join(','))].join('\n');
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = `${currentImage.replace(/\.[^/.]+$/, '')}_detections.csv`;
+        link.click();
+        URL.revokeObjectURL(url);
 
     } catch (error) {
-        console.error('Error saving image:', error);
-        alert('Error saving image: ' + error.message);
+        console.error('Error saving CSV:', error);
+        alert('Error saving CSV: ' + error.message);
     } finally {
         saveImageBtn.disabled = false;
-        saveImageBtn.textContent = 'SAVE IMAGE';
+        saveImageBtn.textContent = 'SAVE';
     }
 }
 
@@ -1035,10 +1216,11 @@ function openDetectionModal(index) {
         const relX2 = (x2 - padX1) * boxScaleX;
         const relY2 = (y2 - padY1) * boxScaleY;
 
-        // Get color for this class
-        const uniqueClasses = [...new Set(detections.map(d => d.class))];
-        const classIndex = uniqueClasses.indexOf(det.class);
-        const color = COLORS[classIndex % COLORS.length];
+        // Get color for this class (use parent class, sorted for consistency)
+        const parentClasses = [...new Set(allDetections.map(d => d.original_class || d.class))].sort();
+        const colorKey = det.original_class || det.class;
+        const classIndex = parentClasses.indexOf(colorKey);
+        const color = COLORS[classIndex >= 0 ? classIndex % COLORS.length : 0];
 
         ctx.strokeStyle = color;
         ctx.lineWidth = 3;

@@ -41,6 +41,9 @@ CLASS_LISTS_DIR = Path(__file__).parent / "class_lists"
 CLASS_LISTS_DIR.mkdir(exist_ok=True)
 OUTPUT_DIR = Path(__file__).parent / "test_out"
 OUTPUT_DIR.mkdir(exist_ok=True)
+DETECTIONS_DIR = Path(__file__).parent / "detections"
+DETECTIONS_DIR.mkdir(exist_ok=True)
+THRESHOLDS_FILE = Path(__file__).parent / "thresholds.json"
 THUMBNAIL_SIZE = 150
 DEFAULT_CLASSES = """stop sign
 yield sign
@@ -1015,6 +1018,126 @@ async def save_image_with_detections(request: SaveImageRequest):
         "output_name": output_name,
         "detections_count": len(request.detections)
     }
+
+
+class SaveDetectionsRequest(BaseModel):
+    image_name: str
+    detections: list[dict]
+    camera: Optional[dict] = None
+
+
+@app.post("/api/save-detections")
+async def save_detections_csv(request: SaveDetectionsRequest):
+    """Save detections as CSV file on server."""
+    import csv
+
+    image_stem = Path(request.image_name).stem
+    csv_path = DETECTIONS_DIR / f"{image_stem}.csv"
+
+    headers = [
+        'id', 'image', 'class', 'original_class', 'score',
+        'bbox_x1', 'bbox_y1', 'bbox_x2', 'bbox_y2', 'bbox_width', 'bbox_height',
+        'gps_lat', 'gps_lon', 'camera_lat', 'camera_lon', 'camera_heading',
+        'deep_analyzed', 'local_analyzed', 'local_confidence'
+    ]
+
+    camera = request.camera or {}
+
+    with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerow(headers)
+
+        for det in request.detections:
+            bbox = det.get('bbox', [0, 0, 0, 0])
+            x1, y1, x2, y2 = bbox
+            gps = det.get('gps', {})
+
+            row = [
+                det.get('id', ''),
+                request.image_name,
+                det.get('class', ''),
+                det.get('original_class', ''),
+                f"{det.get('score', 0):.4f}",
+                int(x1), int(y1), int(x2), int(y2),
+                int(x2 - x1), int(y2 - y1),
+                f"{gps.get('lat', ''):.6f}" if gps.get('lat') else '',
+                f"{gps.get('lon', ''):.6f}" if gps.get('lon') else '',
+                f"{camera.get('lat', ''):.6f}" if camera.get('lat') else '',
+                f"{camera.get('lon', ''):.6f}" if camera.get('lon') else '',
+                f"{camera.get('heading', ''):.1f}" if camera.get('heading') else '',
+                'true' if det.get('deep_analyzed') else 'false',
+                'true' if det.get('local_analyzed') else 'false',
+                f"{det.get('local_confidence', ''):.4f}" if det.get('local_confidence') else ''
+            ]
+            writer.writerow(row)
+
+    return {"status": "success", "csv_path": str(csv_path), "detections_count": len(request.detections)}
+
+
+@app.get("/api/load-detections/{image_name}")
+async def load_detections_csv(image_name: str):
+    """Load detections from CSV file if exists."""
+    import csv
+
+    image_stem = Path(image_name).stem
+    csv_path = DETECTIONS_DIR / f"{image_stem}.csv"
+
+    if not csv_path.exists():
+        return {"exists": False, "detections": [], "camera": None}
+
+    detections = []
+    camera = None
+
+    with open(csv_path, 'r', encoding='utf-8') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            det = {
+                'id': int(row['id']) if row['id'] else None,
+                'class': row['class'],
+                'original_class': row['original_class'] if row['original_class'] else None,
+                'score': float(row['score']) if row['score'] else 0,
+                'bbox': [float(row['bbox_x1']), float(row['bbox_y1']),
+                         float(row['bbox_x2']), float(row['bbox_y2'])],
+                'deep_analyzed': row['deep_analyzed'] == 'true',
+                'local_analyzed': row['local_analyzed'] == 'true',
+            }
+            if row['gps_lat'] and row['gps_lon']:
+                det['gps'] = {'lat': float(row['gps_lat']), 'lon': float(row['gps_lon'])}
+            if row['local_confidence']:
+                det['local_confidence'] = float(row['local_confidence'])
+            detections.append(det)
+
+            if camera is None and row['camera_lat'] and row['camera_lon']:
+                camera = {
+                    'lat': float(row['camera_lat']),
+                    'lon': float(row['camera_lon']),
+                    'heading': float(row['camera_heading']) if row['camera_heading'] else None
+                }
+
+    return {"exists": True, "detections": detections, "camera": camera}
+
+
+@app.get("/api/thresholds")
+async def get_thresholds():
+    """Load saved default thresholds."""
+    if not THRESHOLDS_FILE.exists():
+        return {"thresholds": {}}
+
+    with open(THRESHOLDS_FILE, 'r', encoding='utf-8') as f:
+        data = json.load(f)
+    return {"thresholds": data}
+
+
+class SaveThresholdsRequest(BaseModel):
+    thresholds: dict
+
+
+@app.post("/api/thresholds")
+async def save_thresholds(request: SaveThresholdsRequest):
+    """Save default thresholds."""
+    with open(THRESHOLDS_FILE, 'w', encoding='utf-8') as f:
+        json.dump(request.thresholds, f, indent=2)
+    return {"status": "success", "count": len(request.thresholds)}
 
 
 @app.get("/api/model-status")

@@ -1,0 +1,4 @@
+id,image,class,original_class,score,bbox_x1,bbox_y1,bbox_x2,bbox_y2,bbox_width,bbox_height,gps_lat,gps_lon,camera_lat,camera_lon,camera_heading,deep_analyzed,local_analyzed,local_confidence
+,ladybug_panoramic_1010.jpg,road_sign.divieto_transito,road sign,0.6367,5314,3789,5428,3928,114,138,,,,,325.4,false,true,0.6069
+,ladybug_panoramic_1010.jpg,road_sign.strada_prioritaria,road sign,0.3809,311,3964,340,3993,29,28,,,,,325.4,false,true,0.1021
+,ladybug_panoramic_1010.jpg,road_crack.tipo_Longitudinal Crack,road crack,0.3672,4335,4576,4607,4800,272,224,,,,,325.4,false,true,0.4609

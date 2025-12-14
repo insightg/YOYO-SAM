@@ -343,6 +343,8 @@ body {
 .detection-class {
     flex: 1;
     font-weight: 500;
+    min-width: 0;
+    word-break: break-word;
 }
 
 .detection-score {
@@ -454,7 +456,7 @@ body {
     align-items: center;
 }
 
-.reset-btn {
+.reset-btn, .save-btn {
     padding: 2px 8px;
     font-size: 10px;
     background: var(--bg-tertiary);
@@ -465,7 +467,12 @@ body {
     text-transform: uppercase;
 }
 
-.reset-btn:hover {
+.save-btn {
+    font-size: 12px;
+    padding: 2px 6px;
+}
+
+.reset-btn:hover, .save-btn:hover {
     background: var(--accent);
     color: white;
 }
@@ -534,6 +541,34 @@ body {
     color: var(--text-secondary);
     min-width: 20px;
     text-align: right;
+}
+
+/* Parent class slider (bold, full width) */
+.class-threshold-item.parent-class {
+    background: rgba(255,255,255,0.03);
+    margin: 4px 0 0 0;
+    padding: 8px 4px;
+    border-radius: 4px;
+}
+
+.class-threshold-item.parent-class .class-threshold-name {
+    font-weight: 600;
+    font-size: 12px;
+}
+
+/* Subclass slider (indented, smaller) */
+.class-threshold-item.subclass {
+    padding-left: 20px;
+    border-bottom: 1px solid rgba(255,255,255,0.05);
+}
+
+.class-threshold-item.subclass .class-threshold-name {
+    font-size: 10px;
+    color: var(--text-secondary);
+}
+
+.class-threshold-item.subclass .class-threshold-slider {
+    width: 50px;
 }
 
 select {

@@ -68,20 +68,13 @@
             </div>
 
             <div class="control-group class-thresholds-group" id="class-thresholds-group" style="display: none;">
-                <label>Per-Class Thresholds <button id="reset-thresholds-btn" class="reset-btn">Reset</button></label>
+                <label>Per-Class Thresholds
+                    <button id="save-thresholds-btn" class="save-btn" title="Save as defaults">💾</button>
+                    <button id="reset-thresholds-btn" class="reset-btn">Reset</button>
+                </label>
                 <div class="class-thresholds" id="class-thresholds">
                     <!-- Per-class sliders will be added here -->
                 </div>
-            </div>
-
-            <div class="control-group">
-                <label for="tiles">Tiles</label>
-                <select id="tiles">
-                    <option value="0">No tiles (small images)</option>
-                    <option value="6">6 tiles (2x3)</option>
-                    <option value="12">12 tiles (3x4)</option>
-                    <option value="24" selected>24 tiles (4x6) - Recommended</option>
-                </select>
             </div>
 
             <div class="control-group">
@@ -128,7 +121,7 @@ sidewalk</textarea>
                     DETECT
                 </button>
                 <button id="save-btn" class="save-button" disabled>
-                    SAVE IMAGE
+                    SAVE
                 </button>
                 <button id="export-btn" class="export-button" disabled>
                     EXPORT CSV

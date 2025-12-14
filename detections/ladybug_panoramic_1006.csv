@@ -1,0 +1,14 @@
+id,image,class,original_class,score,bbox_x1,bbox_y1,bbox_x2,bbox_y2,bbox_width,bbox_height,gps_lat,gps_lon,camera_lat,camera_lon,camera_heading,deep_analyzed,local_analyzed,local_confidence
+,ladybug_panoramic_1006.jpg,road_sign.direzione_obbligatoria_dritto,road sign,0.8281,7069,3888,7125,3948,56,60,,,,,326.1,false,true,0.6897
+,ladybug_panoramic_1006.jpg,road_sign.passaggio_obbligatorio_destra,road sign,0.7539,3845,4128,3911,4195,65,66,,,,,326.1,false,true,0.5741
+,ladybug_panoramic_1006.jpg,road_sign.passaggio_obbligatorio_destra,road sign,0.7031,1848,4117,1887,4177,39,60,,,,,326.1,false,true,0.9733
+,ladybug_panoramic_1006.jpg,road_sign.strada_prioritaria,road sign,0.6406,427,3938,474,3982,46,43,,,,,326.1,false,true,0.6800
+,ladybug_panoramic_1006.jpg,road_crack.tipo_Longitudinal Crack,road crack,0.6250,11188,5529,11483,5999,295,470,,,,,326.1,false,true,0.5547
+,ladybug_panoramic_1006.jpg,pothole,,0.5742,1701,4763,2272,4920,571,157,,,,,326.1,false,false,
+,ladybug_panoramic_1006.jpg,pothole,,0.5547,2660,4912,3210,5066,550,154,,,,,326.1,false,false,
+,ladybug_panoramic_1006.jpg,pothole,,0.5078,1133,4613,1510,4706,376,92,,,,,326.1,false,false,
+,ladybug_panoramic_1006.jpg,road_sign.direzione_obbligatoria_dritto,road sign,0.4395,7073,3890,7121,4186,48,296,,,,,326.1,false,true,0.2403
+,ladybug_panoramic_1006.jpg,pothole,,0.4238,627,4377,779,4405,152,28,,,,,326.1,false,false,
+,ladybug_panoramic_1006.jpg,road_crack.tipo_Longitudinal Crack,road crack,0.3379,4698,4560,5001,4763,302,202,,,,,326.1,false,true,0.3340
+,ladybug_panoramic_1006.jpg,pothole,,0.3301,7174,4460,7385,4499,210,39,,,,,326.1,false,false,
+,ladybug_panoramic_1006.jpg,pothole,,0.3164,5624,4501,5775,4534,151,32,,,,,326.1,false,false,

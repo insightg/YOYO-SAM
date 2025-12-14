@@ -1,0 +1,8 @@
+{
+  "__parent__road sign": 0.8,
+  "road_sign.direzione_obbligatoria_dritto": 0.8,
+  "road_sign.passaggio_obbligatorio_destra": 0.8,
+  "road_sign.strada_prioritaria": 0.8,
+  "__parent__pothole": 0.45,
+  "pothole": 0.45
+}
