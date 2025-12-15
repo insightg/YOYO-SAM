@@ -12,6 +12,7 @@ import hashlib
 import asyncio
 from pathlib import Path
 from typing import Optional, AsyncGenerator
+from concurrent.futures import ThreadPoolExecutor
 
 import cv2
 import numpy as np
@@ -23,10 +24,18 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
+# Thread pool for parallel preprocessing
+_preprocess_executor = ThreadPoolExecutor(max_workers=4)
+
 # Add local modules to path
 from geolocate import get_poses, geolocate_detections
 from deep_analyze import is_deep_class, deep_analyze_detection
 from local_analyze import is_local_class, local_analyze_detection, batch_analyze_detections
+from crack_analyze import is_crack_class
+from reconstruct_3d import (
+    generate_3d_from_detection, cleanup_cache as cleanup_3d_cache,
+    check_sam3d_available, get_cache_status, CACHE_DIR as CACHE_3D_DIR
+)
 
 # Add sam3 to path
 sys.path.insert(0, str(Path(__file__).parent / "sam3"))
@@ -69,6 +78,7 @@ sidewalk"""
 # Global model (loaded once)
 _processor: Optional[Sam3Processor] = None
 _model_loading = False
+_text_embeddings_cache: dict = {}  # Cache for text embeddings
 
 
 def get_processor() -> Sam3Processor:
@@ -88,12 +98,122 @@ def get_processor() -> Sam3Processor:
         sam3_root = os.path.join(os.path.dirname(sam3.__file__), "..")
         bpe_path = f"{sam3_root}/assets/bpe_simple_vocab_16e6.txt.gz"
         model = build_sam3_image_model(bpe_path=bpe_path)
+
+        # Apply torch.compile for faster inference
+        print("Applying torch.compile optimization...")
+        try:
+            model.backbone = torch.compile(model.backbone, mode="reduce-overhead")
+            print("torch.compile applied successfully")
+        except Exception as e:
+            print(f"torch.compile failed (falling back to eager mode): {e}")
+
         _processor = Sam3Processor(model, confidence_threshold=0.1)
 
         print("SAM3 model loaded successfully")
         _model_loading = False
 
     return _processor
+
+
+def get_text_embedding(processor, class_name: str, device: str = "cuda"):
+    """Get cached text embedding for a class name."""
+    global _text_embeddings_cache
+
+    if class_name not in _text_embeddings_cache:
+        text_outputs = processor.model.backbone.forward_text([class_name], device=device)
+        _text_embeddings_cache[class_name] = {
+            k: v.clone() if hasattr(v, 'clone') else v
+            for k, v in text_outputs.items()
+        }
+
+    return _text_embeddings_cache[class_name]
+
+
+def set_text_prompt_cached(processor, state: dict, class_name: str):
+    """
+    Apply cached text embedding and run inference.
+    Faster than set_text_prompt() for repeated class names.
+    """
+    if "backbone_out" not in state:
+        raise ValueError("You must call set_image before set_text_prompt_cached")
+
+    # Get cached text embedding
+    cached_text = get_text_embedding(processor, class_name)
+
+    # Apply to state (clone to avoid modifying cache)
+    for k, v in cached_text.items():
+        state["backbone_out"][k] = v.clone() if hasattr(v, 'clone') else v
+
+    if "geometric_prompt" not in state:
+        state["geometric_prompt"] = processor.model._get_dummy_prompt()
+
+    # Run forward grounding
+    return processor._forward_grounding(state)
+
+
+def precompute_text_embeddings(processor, classes: list[str]):
+    """Pre-compute and cache all text embeddings for the given classes."""
+    for class_name in classes:
+        get_text_embedding(processor, class_name)
+
+
+def process_tiles_batch(processor, tiles_data: list, classes: list[str],
+                        confidence: float, y_crop_offset: int,
+                        original_width: int, original_height: int) -> list[dict]:
+    """
+    Process multiple tiles with optimized batching.
+    Uses CUDA streams for better GPU utilization.
+    """
+    all_detections = []
+
+    # Pre-compute all text embeddings
+    precompute_text_embeddings(processor, classes)
+
+    # Create CUDA stream for async operations
+    stream = torch.cuda.Stream() if torch.cuda.is_available() else None
+
+    for tile, x_offset, y_offset in tiles_data:
+        # Calculate backbone (most expensive operation)
+        with torch.cuda.stream(stream) if stream else torch.no_grad():
+            inference_state = processor.set_image(tile)
+
+        # Process all classes for this tile
+        for class_name in classes:
+            processor.reset_all_prompts(inference_state)
+            inference_state = set_text_prompt_cached(processor, inference_state, class_name)
+
+            if "scores" in inference_state and len(inference_state["scores"]) > 0:
+                scores = inference_state["scores"]
+                boxes = inference_state["boxes"]
+
+                for i, score in enumerate(scores):
+                    score_val = score.item() if hasattr(score, "item") else float(score)
+                    if score_val >= confidence:
+                        box = boxes[i].cpu().numpy() if hasattr(boxes[i], "cpu") else boxes[i]
+                        x1, y1, x2, y2 = box
+
+                        x1_adj = float(x1) + x_offset
+                        y1_adj = float(y1) + y_offset + y_crop_offset
+                        x2_adj = float(x2) + x_offset
+                        y2_adj = float(y2) + y_offset + y_crop_offset
+
+                        all_detections.append({
+                            "class": class_name,
+                            "score": round(score_val, 4),
+                            "bbox": [x1_adj, y1_adj, x2_adj, y2_adj],
+                            "bbox_normalized": [
+                                x1_adj / original_width,
+                                y1_adj / original_height,
+                                x2_adj / original_width,
+                                y2_adj / original_height
+                            ]
+                        })
+
+    # Sync CUDA stream
+    if stream:
+        stream.synchronize()
+
+    return all_detections
 
 
 # Panorama preprocessing settings
@@ -217,10 +337,13 @@ def process_tile(processor, tile, classes, confidence_threshold, x_offset, y_off
     """Process a single tile and return detections."""
     all_detections = []
 
+    # OPTIMIZATION: Calculate backbone ONCE per tile, reuse for all classes
+    inference_state = processor.set_image(tile)
+
     for class_name in classes:
-        inference_state = processor.set_image(tile)
         processor.reset_all_prompts(inference_state)
-        inference_state = processor.set_text_prompt(state=inference_state, prompt=class_name)
+        # OPTIMIZATION: Use cached text embeddings
+        inference_state = set_text_prompt_cached(processor, inference_state, class_name)
 
         if "scores" in inference_state and len(inference_state["scores"]) > 0:
             scores = inference_state["scores"]
@@ -269,10 +392,13 @@ def detect_objects(image_path: Path, classes: list[str], confidence: float, tile
             )
             all_detections.extend(tile_detections)
     else:
+        # OPTIMIZATION: Calculate backbone ONCE, reuse for all classes
+        inference_state = processor.set_image(image)
+
         for class_name in classes:
-            inference_state = processor.set_image(image)
             processor.reset_all_prompts(inference_state)
-            inference_state = processor.set_text_prompt(state=inference_state, prompt=class_name)
+            # OPTIMIZATION: Use cached text embeddings
+            inference_state = set_text_prompt_cached(processor, inference_state, class_name)
 
             if "scores" in inference_state and len(inference_state["scores"]) > 0:
                 scores = inference_state["scores"]
@@ -339,7 +465,11 @@ async def list_images(limit: int = Query(100, ge=1, le=5000), offset: int = Quer
         all_images.extend(IMAGES_DIR.glob(f"*{ext}"))
         all_images.extend(IMAGES_DIR.glob(f"*{ext.upper()}"))
 
-    all_images = sorted(all_images, key=lambda x: x.name)
+    # Get list of images that have CSV detections
+    csv_stems = {f.stem for f in DETECTIONS_DIR.glob("*.csv")} if DETECTIONS_DIR.exists() else set()
+
+    # Sort: images with CSV first, then alphabetically
+    all_images = sorted(all_images, key=lambda x: (0 if x.stem in csv_stems else 1, x.name))
     total = len(all_images)
 
     # Apply pagination
@@ -349,7 +479,8 @@ async def list_images(limit: int = Query(100, ge=1, le=5000), offset: int = Quer
         "total": total,
         "offset": offset,
         "limit": limit,
-        "images": [img.name for img in images]
+        "images": [img.name for img in images],
+        "has_csv": [img.stem in csv_stems for img in images]
     }
 
 
@@ -429,14 +560,14 @@ async def detect(request: DetectRequest):
     try:
         # Separate deep/local analysis classes from regular classes
         deep_classes = {}   # base_class -> True (LLM analysis)
-        local_classes = {}  # base_class -> True (local GTSRB model)
+        local_classes = {}  # base_class -> module_name (GTSRB, RDD, or auto)
         detection_classes = []
 
         for cls in request.classes:
             # Check for local analysis first (takes precedence)
-            is_local, base_class = is_local_class(cls)
+            is_local, base_class, module = is_local_class(cls)
             if is_local:
-                local_classes[base_class] = True
+                local_classes[base_class] = module
                 detection_classes.append(base_class)
                 continue
 
@@ -456,19 +587,22 @@ async def detect(request: DetectRequest):
             request.tiles
         )
 
-        # Perform local analysis for marked classes (GTSRB model)
+        # Perform local analysis for marked classes (GTSRB/RDD model)
         if local_classes:
             for det in detections:
                 if det["class"] in local_classes:
                     det["original_class"] = det["class"]
+                    module = local_classes[det["class"]]  # Get explicit module
                     detailed_class, local_confidence = local_analyze_detection(
                         image_path,
                         det,
-                        det["class"]
+                        det["class"],
+                        module
                     )
                     det["class"] = detailed_class
                     det["local_analyzed"] = True
                     det["local_confidence"] = round(local_confidence, 4)
+                    det["local_module"] = module if module != "auto" else ("RDD" if is_crack_class(det["original_class"]) else "GTSRB")
 
         # Perform deep analysis for marked classes (LLM)
         if deep_classes:
@@ -546,13 +680,13 @@ async def detect_with_progress(image_name: str, classes: list[str], confidence: 
 
         # Parse classes
         deep_classes = {}
-        local_classes = {}
+        local_classes = {}  # { base_class: module_name }
         detection_classes = []
 
         for cls in classes:
-            is_local, base_class = is_local_class(cls)
+            is_local, base_class, module = is_local_class(cls)
             if is_local:
-                local_classes[base_class] = True
+                local_classes[base_class] = module  # Store module name (GTSRB, RDD, or auto)
                 detection_classes.append(base_class)
                 continue
 
@@ -568,6 +702,10 @@ async def detect_with_progress(image_name: str, classes: list[str], confidence: 
         await asyncio.sleep(0.05)
 
         processor = get_processor()
+
+        # Pre-compute all text embeddings (runs in parallel with image loading)
+        yield {"type": "progress", "stage": "text_cache", "message": "Pre-computing text embeddings...", "percent": 6}
+        precompute_text_embeddings(processor, detection_classes)
 
         # Step 3: Load and preprocess image
         yield {"type": "progress", "stage": "image", "message": "Caricamento immagine...", "percent": 8}
@@ -620,8 +758,12 @@ async def detect_with_progress(image_name: str, classes: list[str], confidence: 
             total_classes = len(detection_classes)
 
             # Step 5: Process each tile
+            # OPTIMIZATION: Calculate backbone ONCE per tile, reuse for all classes
             for tile_idx, (tile, x_offset, y_offset) in enumerate(tile_list):
                 base_percent = 15 + (tile_idx / total_tiles) * 60  # 15-75%
+
+                # Calculate backbone once for this tile
+                inference_state = processor.set_image(tile)
 
                 for class_idx, class_name in enumerate(detection_classes):
                     class_percent = base_percent + ((class_idx / total_classes) * (60 / total_tiles))
@@ -636,10 +778,9 @@ async def detect_with_progress(image_name: str, classes: list[str], confidence: 
                     }
                     await asyncio.sleep(0.01)
 
-                    # Run detection on this tile/class
-                    inference_state = processor.set_image(tile)
+                    # Reuse backbone, use cached text embeddings
                     processor.reset_all_prompts(inference_state)
-                    inference_state = processor.set_text_prompt(state=inference_state, prompt=class_name)
+                    inference_state = set_text_prompt_cached(processor, inference_state, class_name)
 
                     if "scores" in inference_state and len(inference_state["scores"]) > 0:
                         scores = inference_state["scores"]
@@ -669,7 +810,10 @@ async def detect_with_progress(image_name: str, classes: list[str], confidence: 
                                 })
         else:
             # Process whole image (no tiles)
+            # OPTIMIZATION: Calculate backbone ONCE, reuse for all classes
             total_classes = len(detection_classes)
+            inference_state = processor.set_image(image)
+
             for class_idx, class_name in enumerate(detection_classes):
                 class_percent = 15 + ((class_idx / total_classes) * 60)
                 yield {
@@ -681,9 +825,9 @@ async def detect_with_progress(image_name: str, classes: list[str], confidence: 
                 }
                 await asyncio.sleep(0.01)
 
-                inference_state = processor.set_image(image)
+                # Reuse backbone, use cached text embeddings
                 processor.reset_all_prompts(inference_state)
-                inference_state = processor.set_text_prompt(state=inference_state, prompt=class_name)
+                inference_state = set_text_prompt_cached(processor, inference_state, class_name)
 
                 if "scores" in inference_state and len(inference_state["scores"]) > 0:
                     scores = inference_state["scores"]
@@ -747,25 +891,27 @@ async def detect_with_progress(image_name: str, classes: list[str], confidence: 
                 # Process each class group in batch
                 processed = 0
                 for cls, dets in by_class.items():
+                    module = local_classes.get(cls, "auto")  # Get module name for this class
                     yield {
                         "type": "progress",
                         "stage": "local_analysis",
-                        "message": f"Analisi batch: {cls} ({len(dets)} items)",
+                        "message": f"Analisi batch ({module}): {cls} ({len(dets)} items)",
                         "percent": 76 + int((processed / total_local) * 8),
                         "current_class": cls
                     }
                     await asyncio.sleep(0.01)
 
-                    # Batch inference on GPU
-                    results = batch_analyze_detections(local_image, dets, cls)
+                    # Batch inference on GPU with explicit module
+                    results = batch_analyze_detections(local_image, dets, cls, module)
 
-                    # Apply results
+                    # Apply results - format: base_class.label
+                    base_clean = cls.replace(" ", "_").lower()
                     for det, (label, conf) in zip(dets, results):
                         det["original_class"] = det["class"]
-                        base_clean = cls.replace(" ", "_").lower()
                         det["class"] = f"{base_clean}.{label}"
                         det["local_analyzed"] = True
                         det["local_confidence"] = round(conf, 4)
+                        det["local_module"] = module if module != "auto" else ("RDD" if is_crack_class(cls) else "GTSRB")
 
                     processed += len(dets)
 
@@ -823,6 +969,10 @@ async def detect_with_progress(image_name: str, classes: list[str], confidence: 
 
         # Sort by score
         all_detections.sort(key=lambda x: x["score"], reverse=True)
+
+        # Assign sequential IDs (after sorting)
+        for idx, det in enumerate(all_detections, start=1):
+            det["id"] = idx
 
         # Step 9: Done
         yield {"type": "progress", "stage": "complete", "message": "Completato!", "percent": 100}
@@ -1147,6 +1297,256 @@ async def model_status():
         "loaded": _processor is not None,
         "loading": _model_loading,
         "device": "cuda" if torch.cuda.is_available() else "cpu"
+    }
+
+
+# ============ 3D Reconstruction Endpoints ============
+
+class Generate3DRequest(BaseModel):
+    image_name: str
+    bbox: list[float]
+    detection_id: str = "0"
+    force: bool = False  # If True, regenerate even if cached
+
+
+class Check3DRequest(BaseModel):
+    image_name: str
+    bbox: list[float]
+    detection_id: str = "0"
+
+
+def get_ply_cache_path(image_path: str, bbox: list, detection_id: str) -> Path:
+    """Get the cache path for a PLY file without generating it."""
+    import hashlib
+    cache_key = hashlib.md5(f"{image_path}_{bbox}_{detection_id}".encode()).hexdigest()
+    return CACHE_3D_DIR / f"{cache_key}.ply"
+
+
+@app.post("/api/check-3d")
+async def check_3d_exists(request: Check3DRequest):
+    """
+    Check if a 3D reconstruction already exists in cache.
+
+    Returns: { exists: bool, ply_url: str|null }
+    """
+    image_path = IMAGES_DIR / request.image_name
+    if not image_path.exists():
+        raise HTTPException(404, "Image not found")
+
+    ply_path = get_ply_cache_path(str(image_path), request.bbox, request.detection_id)
+
+    if ply_path.exists():
+        return {
+            "exists": True,
+            "ply_url": f"/api/ply/{ply_path.name}"
+        }
+    else:
+        return {
+            "exists": False,
+            "ply_url": None
+        }
+
+
+@app.get("/api/3d-status")
+async def get_3d_status():
+    """Check SAM-3D availability and cache status."""
+    available, message = check_sam3d_available()
+    cache = get_cache_status()
+    return {
+        "available": available,
+        "message": message,
+        "cache": cache
+    }
+
+
+@app.post("/api/generate-3d")
+async def generate_3d(request: Generate3DRequest):
+    """
+    Generate 3D reconstruction for a detection.
+
+    Body: { image_name, bbox: [x1,y1,x2,y2], detection_id, force: bool }
+    Returns: { ply_url, cached: bool }
+    """
+    image_path = IMAGES_DIR / request.image_name
+    if not image_path.exists():
+        raise HTTPException(404, "Image not found")
+
+    # Check if cached version exists
+    ply_path = get_ply_cache_path(str(image_path), request.bbox, request.detection_id)
+
+    # If cached and not forcing regeneration, return cached
+    if ply_path.exists() and not request.force:
+        return {
+            "ply_url": f"/api/ply/{ply_path.name}",
+            "cached": True
+        }
+
+    # Need to generate - check if SAM-3D is available
+    available, message = check_sam3d_available()
+    if not available:
+        raise HTTPException(
+            status_code=503,
+            detail=f"SAM-3D not available: {message}"
+        )
+
+    # If forcing, delete existing cache
+    if request.force and ply_path.exists():
+        try:
+            ply_path.unlink()
+        except Exception:
+            pass
+
+    try:
+        ply_path = generate_3d_from_detection(
+            str(image_path),
+            request.bbox,
+            request.detection_id
+        )
+        return {
+            "ply_url": f"/api/ply/{ply_path.name}",
+            "cached": False
+        }
+    except Exception as e:
+        raise HTTPException(500, f"3D generation failed: {str(e)}")
+
+
+@app.get("/api/ply/{filename}")
+async def serve_ply(filename: str):
+    """Serve PLY file from cache."""
+    # Validate filename (prevent path traversal)
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(400, "Invalid filename")
+
+    ply_path = CACHE_3D_DIR / filename
+    if not ply_path.exists():
+        raise HTTPException(404, "PLY not found")
+
+    return FileResponse(
+        ply_path,
+        media_type="application/octet-stream",
+        filename=filename,
+        headers={"Content-Disposition": f"inline; filename={filename}"}
+    )
+
+
+@app.post("/api/cleanup-3d-cache")
+async def cleanup_3d_cache_endpoint():
+    """Clean up old PLY files from cache."""
+    removed = cleanup_3d_cache()
+    cache = get_cache_status()
+    return {"removed": removed, "cache": cache}
+
+
+# ============ Panoramic 360 Viewer Endpoints ============
+
+@app.get("/api/gps-trajectory")
+async def get_gps_trajectory():
+    """Get full GPS trajectory for minimap."""
+    poses = get_poses()
+    if not poses:
+        return {"count": 0, "bounds": None, "points": []}
+
+    trajectory = []
+    for name, pose in sorted(poses.items(), key=lambda x: x[0]):
+        trajectory.append({
+            "name": name,
+            "lat": pose.latitude,
+            "lon": pose.longitude,
+            "heading": pose.heading,
+            "altitude": pose.altitude,
+            "timestamp": pose.timestamp
+        })
+
+    # Calculate bounding box for map centering
+    lats = [p["lat"] for p in trajectory]
+    lons = [p["lon"] for p in trajectory]
+    bounds = {
+        "minLat": min(lats), "maxLat": max(lats),
+        "minLon": min(lons), "maxLon": max(lons),
+        "centerLat": sum(lats) / len(lats),
+        "centerLon": sum(lons) / len(lons)
+    }
+
+    return {"count": len(trajectory), "bounds": bounds, "points": trajectory}
+
+
+@app.get("/api/panorama/{image_name}")
+async def get_panorama_texture(
+    image_name: str,
+    resolution: str = Query("medium", regex="^(low|medium|high|full)$")
+):
+    """
+    Get panorama image for 360 viewer with configurable resolution.
+
+    Resolutions:
+      - low: 2048x1024 (~200KB) - initial fast load
+      - medium: 4096x2048 (~800KB) - default quality
+      - high: 8192x4096 (~3MB) - high quality
+      - full: 16000x8000 (~12MB) - original
+    """
+    image_path = IMAGES_DIR / image_name
+    if not image_path.exists():
+        raise HTTPException(404, "Image not found")
+
+    resolution_sizes = {
+        "low": 2048,
+        "medium": 4096,
+        "high": 8192,
+        "full": 16000
+    }
+    max_width = resolution_sizes.get(resolution, 4096)
+
+    img = Image.open(image_path)
+
+    if img.width > max_width:
+        ratio = max_width / img.width
+        new_size = (max_width, int(img.height * ratio))
+        img = img.resize(new_size, Image.Resampling.LANCZOS)
+
+    quality = 85 if resolution in ("low", "medium") else 92
+
+    buffer = io.BytesIO()
+    img.save(buffer, format="JPEG", quality=quality)
+    buffer.seek(0)
+
+    return StreamingResponse(
+        buffer,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "public, max-age=86400"}  # Cache 24h
+    )
+
+
+@app.get("/api/panorama-info/{image_name}")
+async def get_panorama_info(image_name: str):
+    """Get panorama metadata including GPS position and navigation."""
+    image_path = IMAGES_DIR / image_name
+    if not image_path.exists():
+        raise HTTPException(404, "Image not found")
+
+    poses = get_poses()
+    pose = poses.get(image_name)
+
+    # Get neighboring images for navigation
+    image_names = sorted(poses.keys())
+    current_idx = image_names.index(image_name) if image_name in image_names else -1
+
+    prev_image = image_names[current_idx - 1] if current_idx > 0 else None
+    next_image = image_names[current_idx + 1] if current_idx < len(image_names) - 1 else None
+
+    return {
+        "name": image_name,
+        "index": current_idx,
+        "total": len(image_names),
+        "gps": {
+            "lat": pose.latitude,
+            "lon": pose.longitude,
+            "heading": pose.heading,
+            "altitude": pose.altitude
+        } if pose else None,
+        "navigation": {
+            "prev": prev_image,
+            "next": next_image
+        }
     }
 
 

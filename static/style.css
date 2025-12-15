@@ -155,6 +155,18 @@ body {
     display: inline-block;
 }
 
+.image-list-item .csv-icon {
+    font-size: 11px;
+    margin-right: 6px;
+    min-width: 14px;
+    display: inline-block;
+}
+
+.image-list-item .image-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
 /* Thumbnails (grid view - optional) */
 .thumbnails {
     flex: 1;
@@ -202,6 +214,17 @@ body {
     text-overflow: ellipsis;
     overflow: hidden;
     white-space: nowrap;
+}
+
+.thumbnail .csv-badge {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    font-size: 12px;
+    background: rgba(0, 0, 0, 0.6);
+    border-radius: 3px;
+    padding: 2px 4px;
+    z-index: 1;
 }
 
 /* View toggle button */
@@ -345,6 +368,15 @@ body {
     font-weight: 500;
     min-width: 0;
     word-break: break-word;
+}
+
+.detection-id {
+    font-size: 10px;
+    color: var(--text-secondary);
+    font-weight: 600;
+    margin-right: 6px;
+    min-width: 28px;
+    flex-shrink: 0;
 }
 
 .detection-score {
@@ -732,6 +764,15 @@ select:focus {
     cursor: not-allowed;
 }
 
+.detect-button.stopping {
+    background: #dc2626;
+    cursor: pointer;
+}
+
+.detect-button.stopping:hover {
+    background: #ef4444;
+}
+
 /* Model Status */
 .model-status {
     padding: 15px;
@@ -936,6 +977,50 @@ select:focus {
     color: var(--accent-hover);
 }
 
+/* Modal Actions (3D buttons) */
+.modal-actions {
+    display: flex;
+    gap: 8px;
+    margin-left: auto;
+    margin-right: 15px;
+}
+
+.btn-3d {
+    padding: 6px 12px;
+    background: var(--accent);
+    border: none;
+    border-radius: 4px;
+    color: white;
+    font-size: 12px;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.btn-3d:hover:not(:disabled) {
+    background: var(--accent-hover);
+}
+
+.btn-3d:disabled {
+    background: var(--bg-tertiary);
+    color: var(--text-secondary);
+    cursor: wait;
+}
+
+/* 3D Viewer Container */
+#modal-3d-container {
+    width: 100%;
+    min-height: 450px;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    background: var(--bg-primary);
+    border-radius: 4px;
+}
+
+#modal-3d-container canvas {
+    border-radius: 4px;
+}
+
 /* Scrollbar */
 ::-webkit-scrollbar {
     width: 8px;
@@ -952,4 +1037,274 @@ select:focus {
 
 ::-webkit-scrollbar-thumb:hover {
     background: var(--bg-tertiary);
+}
+
+/* ============================================
+   Panoramic 360° Viewer
+   ============================================ */
+
+.panorama-viewer {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    background: #000;
+    z-index: 3000;
+}
+
+.panorama-container {
+    width: 100%;
+    height: 100%;
+}
+
+.panorama-container canvas {
+    display: block;
+}
+
+/* Close button */
+.panorama-close-btn {
+    position: absolute;
+    top: 20px;
+    right: 20px;
+    width: 44px;
+    height: 44px;
+    background: rgba(0, 0, 0, 0.7);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 50%;
+    color: white;
+    font-size: 28px;
+    line-height: 40px;
+    text-align: center;
+    cursor: pointer;
+    z-index: 100;
+    transition: background 0.2s, transform 0.2s;
+}
+
+.panorama-close-btn:hover {
+    background: var(--accent);
+    transform: scale(1.1);
+}
+
+/* Navigation arrows */
+.panorama-nav {
+    position: absolute;
+    bottom: 50%;
+    left: 0;
+    right: 0;
+    display: flex;
+    justify-content: space-between;
+    padding: 0 20px;
+    pointer-events: none;
+    transform: translateY(50%);
+}
+
+.nav-arrow {
+    width: 50px;
+    height: 50px;
+    background: rgba(0, 0, 0, 0.6);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 50%;
+    color: white;
+    font-size: 24px;
+    cursor: pointer;
+    pointer-events: auto;
+    transition: background 0.2s, transform 0.2s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.nav-arrow:hover:not(:disabled) {
+    background: var(--accent);
+    transform: scale(1.1);
+}
+
+.nav-arrow:disabled {
+    opacity: 0.3;
+    cursor: not-allowed;
+}
+
+.nav-arrow.nav-prev {
+    padding-right: 3px;
+}
+
+.nav-arrow.nav-next {
+    padding-left: 3px;
+}
+
+/* Info panel at bottom */
+.panorama-info {
+    position: absolute;
+    bottom: 20px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: rgba(0, 0, 0, 0.8);
+    padding: 12px 24px;
+    border-radius: 8px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    color: white;
+    display: flex;
+    gap: 20px;
+    align-items: center;
+    font-size: 13px;
+    z-index: 50;
+}
+
+.panorama-name {
+    font-weight: 600;
+    max-width: 300px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.panorama-gps {
+    color: var(--accent);
+    font-size: 12px;
+}
+
+.panorama-index {
+    color: var(--text-secondary);
+    font-size: 12px;
+}
+
+/* Mini-map */
+.panorama-minimap {
+    position: absolute;
+    bottom: 80px;
+    right: 20px;
+    width: 250px;
+    height: 200px;
+    background: rgba(0, 0, 0, 0.85);
+    border: 1px solid rgba(255, 255, 255, 0.2);
+    border-radius: 8px;
+    overflow: hidden;
+    z-index: 50;
+}
+
+.panorama-minimap canvas {
+    width: 100%;
+    height: 100%;
+    display: block;
+}
+
+.minimap-controls {
+    position: absolute;
+    bottom: 8px;
+    right: 8px;
+    display: flex;
+    gap: 4px;
+}
+
+.minimap-btn {
+    width: 28px;
+    height: 28px;
+    background: rgba(0, 0, 0, 0.7);
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    border-radius: 4px;
+    color: white;
+    font-size: 18px;
+    font-weight: bold;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.2s;
+}
+
+.minimap-btn:hover {
+    background: var(--accent);
+}
+
+/* Loading indicator */
+.panorama-loading {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    transform: translate(-50%, -50%);
+    background: rgba(0, 0, 0, 0.8);
+    padding: 20px 30px;
+    border-radius: 8px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+    z-index: 200;
+}
+
+.pano-spinner {
+    width: 40px;
+    height: 40px;
+    border: 3px solid rgba(255, 255, 255, 0.2);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+}
+
+.panorama-loading span {
+    color: white;
+    font-size: 14px;
+}
+
+/* Open panorama button (added to image container) */
+.open-panorama-btn {
+    position: absolute;
+    top: 15px;
+    right: 15px;
+    padding: 10px 16px;
+    background: rgba(0, 0, 0, 0.7);
+    border: 1px solid rgba(255, 255, 255, 0.3);
+    border-radius: 6px;
+    color: white;
+    font-size: 14px;
+    cursor: pointer;
+    z-index: 20;
+    transition: background 0.2s, transform 0.2s;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.open-panorama-btn:hover {
+    background: var(--accent);
+    transform: scale(1.05);
+}
+
+/* Responsive adjustments for panorama viewer */
+@media (max-width: 768px) {
+    .panorama-minimap {
+        width: 180px;
+        height: 150px;
+        bottom: 70px;
+        right: 10px;
+    }
+
+    .panorama-info {
+        padding: 10px 16px;
+        gap: 12px;
+        font-size: 12px;
+        flex-wrap: wrap;
+        justify-content: center;
+        max-width: 90vw;
+    }
+
+    .panorama-name {
+        max-width: 200px;
+    }
+
+    .nav-arrow {
+        width: 44px;
+        height: 44px;
+        font-size: 20px;
+    }
+
+    .panorama-close-btn {
+        top: 10px;
+        right: 10px;
+        width: 40px;
+        height: 40px;
+        font-size: 24px;
+        line-height: 36px;
+    }
 }

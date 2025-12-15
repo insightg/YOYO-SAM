@@ -110,7 +110,7 @@ def classify_cracks_batch(images: list[Image.Image], batch_size: int = 8) -> lis
         batch_size: Maximum batch size (YOLOv8 uses more VRAM)
 
     Returns:
-        List of (class_label, confidence) tuples
+        List of (class_label, confidence) tuples - label only, not prefixed
     """
     if not images:
         return []
@@ -150,7 +150,7 @@ def crack_analyze_detection(
     Args:
         image_path: Path to the full image
         detection: Detection dict with bbox
-        base_class: The base class name (without "- local" suffix)
+        base_class: The base class name (without suffix)
 
     Returns:
         (new_class_name, classification_confidence)
@@ -163,7 +163,7 @@ def crack_analyze_detection(
         # Classify with RDD model
         label, confidence = classify_crack(cropped)
 
-        # Format: base_class.subclass
+        # Format: base_class.subclass (es. crack.crepa_longitudinale)
         base_clean = base_class.replace(" ", "_").lower()
         return f"{base_clean}.{label}", confidence
 

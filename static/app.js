@@ -59,6 +59,13 @@ const saveThresholdsBtn = document.getElementById('save-thresholds-btn');
 
 let savedDefaultThresholds = {};  // Loaded from server at startup
 
+// 3D Viewer state
+let current3DViewer = null;      // Three.js renderer/scene
+let current3DControls = null;    // OrbitControls
+let currentPlyUrl = null;
+let is3DAvailable = false;       // SAM-3D status
+let currentModalDetection = null; // Current detection in modal
+
 // Color palette for detections
 const COLORS = [
     '#e94560', '#4ade80', '#fbbf24', '#3b82f6', '#a855f7',
@@ -72,8 +79,10 @@ document.addEventListener('DOMContentLoaded', () => {
     checkModelStatus();
     loadClassLists();
     loadDefaultThresholds();  // Load saved threshold defaults
+    check3DStatus();          // Check SAM-3D availability
     setupEventListeners();
     setupResizableSidebars();
+    setup3DEventListeners();  // 3D modal buttons
 });
 
 function setupEventListeners() {
@@ -122,6 +131,12 @@ function setupEventListeners() {
     detectionModal.addEventListener('click', (e) => {
         if (e.target === detectionModal) closeModal();
     });
+
+    // Prevent 3D container clicks from closing modal
+    const modal3dContainer = document.getElementById('modal-3d-container');
+    if (modal3dContainer) {
+        modal3dContainer.addEventListener('click', (e) => e.stopPropagation());
+    }
     document.addEventListener('keydown', (e) => {
         if (e.key === 'Escape') closeModal();
     });
@@ -231,11 +246,20 @@ function setupResizableSidebars() {
 }
 
 // Load images list
+let imageHasCsv = {};  // Track which images have CSV
+
 async function loadImages() {
     try {
         const response = await fetch('/api/images?limit=5000');
         const data = await response.json();
         allImages = data.images;
+
+        // Build map of images with CSV
+        imageHasCsv = {};
+        data.images.forEach((img, i) => {
+            imageHasCsv[img] = data.has_csv[i];
+        });
+
         imageCountEl.textContent = `${data.total} images`;
         displayMoreImages();
     } catch (error) {
@@ -274,6 +298,36 @@ function displayMoreImages() {
     loadMoreBtn.style.display = displayedImages < filtered.length ? 'block' : 'none';
 }
 
+// Update CSV icon for a single image in the list
+function updateCsvIcon(imageName) {
+    // Update in list view
+    const listItem = document.querySelector(`.image-list-item[data-name="${imageName}"]`);
+    if (listItem) {
+        const csvIcon = listItem.querySelector('.csv-icon');
+        if (csvIcon) {
+            csvIcon.textContent = imageHasCsv[imageName] ? '📋' : '';
+            csvIcon.title = imageHasCsv[imageName] ? 'Has saved detections' : '';
+        }
+    }
+
+    // Update in thumbnail view
+    const thumb = document.querySelector(`.thumbnail[data-name="${imageName}"]`);
+    if (thumb) {
+        let csvBadge = thumb.querySelector('.csv-badge');
+        if (imageHasCsv[imageName]) {
+            if (!csvBadge) {
+                csvBadge = document.createElement('span');
+                csvBadge.className = 'csv-badge';
+                csvBadge.textContent = '📋';
+                csvBadge.title = 'Has saved detections';
+                thumb.insertBefore(csvBadge, thumb.firstChild);
+            }
+        } else if (csvBadge) {
+            csvBadge.remove();
+        }
+    }
+}
+
 function displayImages(images, startIndex = 0) {
     if (viewMode === 'list') {
         // List view (default) - no thumbnails, just text
@@ -286,8 +340,19 @@ function displayImages(images, startIndex = 0) {
             indexSpan.className = 'index';
             indexSpan.textContent = (startIndex + i + 1).toString().padStart(4, ' ');
 
+            // CSV indicator icon
+            const csvIcon = document.createElement('span');
+            csvIcon.className = 'csv-icon';
+            csvIcon.textContent = imageHasCsv[imageName] ? '📋' : '';
+            csvIcon.title = imageHasCsv[imageName] ? 'Has saved detections' : '';
+
+            const nameSpan = document.createElement('span');
+            nameSpan.className = 'image-name';
+            nameSpan.textContent = imageName;
+
             item.appendChild(indexSpan);
-            item.appendChild(document.createTextNode(imageName));
+            item.appendChild(csvIcon);
+            item.appendChild(nameSpan);
 
             item.addEventListener('click', () => selectImage(imageName));
 
@@ -308,6 +373,15 @@ function displayImages(images, startIndex = 0) {
             const nameEl = document.createElement('div');
             nameEl.className = 'name';
             nameEl.textContent = imageName;
+
+            // CSV indicator for thumbnail
+            if (imageHasCsv[imageName]) {
+                const csvBadge = document.createElement('span');
+                csvBadge.className = 'csv-badge';
+                csvBadge.textContent = '📋';
+                csvBadge.title = 'Has saved detections';
+                thumb.appendChild(csvBadge);
+            }
 
             thumb.appendChild(img);
             thumb.appendChild(nameEl);
@@ -364,6 +438,9 @@ async function selectImage(imageName) {
 
         // Load saved detections if exist
         await loadSavedDetections(imageName);
+
+        // Add 360 panorama button
+        addPanoramaButton();
     };
 }
 
@@ -685,7 +762,17 @@ function resetProgress() {
     updateProgress(0, 'Inizializzazione...', '');
 }
 
+// Current detection EventSource (for cancellation)
+let currentEventSource = null;
+let isDetecting = false;
+
 async function runDetection() {
+    // If already detecting, cancel it
+    if (isDetecting && currentEventSource) {
+        cancelDetection();
+        return;
+    }
+
     if (!currentImage) return;
 
     const classes = classesTextarea.value
@@ -706,7 +793,10 @@ async function runDetection() {
     // Show loading with progress
     loadingOverlay.style.display = 'flex';
     resetProgress();
-    detectBtn.disabled = true;
+    isDetecting = true;
+    detectBtn.disabled = false; // Keep enabled so user can click to stop
+    detectBtn.textContent = 'STOP';
+    detectBtn.classList.add('stopping');
 
     // Build SSE URL with query parameters
     const params = new URLSearchParams({
@@ -716,14 +806,14 @@ async function runDetection() {
         tiles: tiles
     });
 
-    const eventSource = new EventSource(`/api/detect-stream?${params}`);
+    currentEventSource = new EventSource(`/api/detect-stream?${params}`);
 
-    eventSource.addEventListener('progress', (event) => {
+    currentEventSource.addEventListener('progress', (event) => {
         const data = JSON.parse(event.data);
         updateProgress(data.percent, data.message, data.current_class || '');
     });
 
-    eventSource.addEventListener('result', (event) => {
+    currentEventSource.addEventListener('result', (event) => {
         const data = JSON.parse(event.data);
 
         // Store all detections (unfiltered) and camera info
@@ -741,12 +831,10 @@ async function runDetection() {
         filterAndDisplayDetections();
 
         // Close connection and hide loading
-        eventSource.close();
-        loadingOverlay.style.display = 'none';
-        detectBtn.disabled = false;
+        finishDetection();
     });
 
-    eventSource.addEventListener('error', (event) => {
+    currentEventSource.addEventListener('error', (event) => {
         let errorMessage = 'Error during detection';
         try {
             const data = JSON.parse(event.data);
@@ -755,30 +843,49 @@ async function runDetection() {
             }
         } catch (e) {
             // SSE connection error
-            if (eventSource.readyState === EventSource.CLOSED) {
+            if (currentEventSource && currentEventSource.readyState === EventSource.CLOSED) {
                 errorMessage = 'Connection closed unexpectedly';
             }
         }
 
         console.error('Detection error:', errorMessage);
-        alert('Error during detection: ' + errorMessage);
+        if (isDetecting) {
+            alert('Error during detection: ' + errorMessage);
+        }
 
-        eventSource.close();
-        loadingOverlay.style.display = 'none';
-        detectBtn.disabled = false;
+        finishDetection();
     });
 
     // Handle SSE connection errors
-    eventSource.onerror = (event) => {
+    currentEventSource.onerror = (event) => {
         // Only handle if not already processed
-        if (eventSource.readyState === EventSource.CLOSED) {
+        if (!currentEventSource || currentEventSource.readyState === EventSource.CLOSED) {
             return;
         }
         console.error('SSE connection error');
-        eventSource.close();
-        loadingOverlay.style.display = 'none';
-        detectBtn.disabled = false;
+        finishDetection();
     };
+}
+
+function cancelDetection() {
+    console.log('Cancelling detection...');
+    if (currentEventSource) {
+        currentEventSource.close();
+        currentEventSource = null;
+    }
+    finishDetection();
+    updateProgress(0, 'Detection cancelled', '');
+}
+
+function finishDetection() {
+    if (currentEventSource) {
+        currentEventSource.close();
+        currentEventSource = null;
+    }
+    isDetecting = false;
+    loadingOverlay.style.display = 'none';
+    detectBtn.textContent = 'DETECT';
+    detectBtn.classList.remove('stopping');
 }
 
 function drawDetections() {
@@ -819,7 +926,8 @@ function drawDetections() {
 
         // Draw label background (use short label for deep analyzed)
         const labelClass = det.deep_analyzed ? det.class.split('.').pop() : det.class;
-        const label = `${labelClass}: ${det.score.toFixed(2)}`;
+        const detId = det.id || (index + 1);
+        const label = `#${detId} ${labelClass}: ${det.score.toFixed(2)}`;
         ctx.font = '12px sans-serif';
         const textWidth = ctx.measureText(label).width;
 
@@ -870,13 +978,15 @@ function showDetectionsList() {
             gpsInfo = `<span class="detection-gps" title="${det.latitude.toFixed(6)}, ${det.longitude.toFixed(6)}">${distInfo}</span>`;
         }
 
-        // Analysis indicator (deep = LLM, local = GTSRB model)
+        // Analysis indicator (deep = LLM, local = GTSRB/RDD model)
         let analysisBadge = '';
         if (det.deep_analyzed) {
             analysisBadge = `<span class="detection-deep" title="Analyzed by LLM (Gemini)">AI</span>`;
         } else if (det.local_analyzed) {
+            // Use local_module field if present, otherwise fallback to 'local'
+            const moduleName = det.local_module || 'local';
             const localConf = det.local_confidence ? ` (${(det.local_confidence * 100).toFixed(0)}%)` : '';
-            analysisBadge = `<span class="detection-local" title="Analyzed by GTSRB model${localConf}">GTSRB</span>`;
+            analysisBadge = `<span class="detection-local" title="Analyzed by ${moduleName} model${localConf}">${moduleName}</span>`;
         }
 
         // Display class name (full, CSS handles overflow)
@@ -884,6 +994,7 @@ function showDetectionsList() {
         const colorKey = det.original_class || det.class;
 
         item.innerHTML = `
+            <span class="detection-id">#${det.id || index + 1}</span>
             <div class="detection-color" style="background: ${parentColors[colorKey]}"></div>
             <span class="detection-class" title="${det.class}">${displayClass}</span>
             ${analysisBadge}
@@ -1109,6 +1220,10 @@ async function saveDetectionsCSV() {
         const data = await response.json();
         console.log(`Saved ${data.detections_count} detections to ${data.csv_path}`);
 
+        // Update CSV icon for this image
+        imageHasCsv[currentImage] = true;
+        updateCsvIcon(currentImage);
+
         // Also download locally
         const headers = [
             'id', 'image', 'class', 'original_class', 'score',
@@ -1227,7 +1342,8 @@ function openDetectionModal(index) {
         ctx.strokeRect(relX1, relY1, relX2 - relX1, relY2 - relY1);
 
         // Update modal info
-        modalTitle.textContent = `${det.class} (${(det.score * 100).toFixed(1)}%)`;
+        const detId = det.id || (index + 1);
+        modalTitle.textContent = `#${detId} - ${det.class} (${(det.score * 100).toFixed(1)}%)`;
 
         // Build info text with GPS if available
         let infoText = `Size: ${Math.round(cropWidth)} x ${Math.round(cropHeight)} px`;
@@ -1241,14 +1357,75 @@ function openDetectionModal(index) {
 
         // Show modal
         detectionModal.style.display = 'flex';
+
+        // Store detection for 3D generation
+        currentModalDetection = det;
+
+        // Show 3D button if available
+        const generate3dBtn = document.getElementById('generate-3d-btn');
+        const toggle3dBtn = document.getElementById('toggle-3d-btn');
+        if (is3DAvailable) {
+            generate3dBtn.style.display = 'inline-block';
+            generate3dBtn.disabled = true;
+            generate3dBtn.textContent = 'Verifica...';
+            toggle3dBtn.style.display = 'none';
+
+            // Check if 3D already exists in cache
+            check3DExists(det).then(result => {
+                if (result.exists) {
+                    // PLY exists - show view button
+                    generate3dBtn.textContent = 'Visualizza 3D';
+                    generate3dBtn.disabled = false;
+                    generate3dBtn.dataset.cached = 'true';
+                    generate3dBtn.dataset.plyUrl = result.ply_url;
+                } else {
+                    // PLY doesn't exist - show generate button
+                    generate3dBtn.textContent = 'Genera 3D';
+                    generate3dBtn.disabled = false;
+                    generate3dBtn.dataset.cached = 'false';
+                    generate3dBtn.dataset.plyUrl = '';
+                }
+            }).catch(() => {
+                generate3dBtn.textContent = 'Genera 3D';
+                generate3dBtn.disabled = false;
+                generate3dBtn.dataset.cached = 'false';
+            });
+        } else {
+            generate3dBtn.style.display = 'none';
+            toggle3dBtn.style.display = 'none';
+        }
     };
 
     // Load the image (use the API endpoint)
     tempImg.src = `/api/image/${encodeURIComponent(currentImage)}?max_size=4000`;
 }
 
-function closeModal() {
+let modalCloseBlocked = false;
+
+function closeModal(event) {
+    if (modalCloseBlocked) {
+        console.log('closeModal BLOCKED - too soon after 3D toggle');
+        return;
+    }
+    console.log('closeModal called!');
+    console.log('Event target:', event?.target?.id || event?.target?.className || 'unknown');
+    console.log('Event type:', event?.type || 'no event');
     detectionModal.style.display = 'none';
+
+    // Cleanup 3D viewer
+    cleanup3DViewer();
+    currentModalDetection = null;
+
+    // Reset 3D UI
+    const canvas2d = document.getElementById('modal-canvas');
+    const container3d = document.getElementById('modal-3d-container');
+    const generate3dBtn = document.getElementById('generate-3d-btn');
+    const toggle3dBtn = document.getElementById('toggle-3d-btn');
+
+    if (canvas2d) canvas2d.style.display = 'block';
+    if (container3d) container3d.style.display = 'none';
+    if (generate3dBtn) generate3dBtn.style.display = 'none';
+    if (toggle3dBtn) toggle3dBtn.style.display = 'none';
 }
 
 // Export detections to CSV with GPS coordinates
@@ -1317,4 +1494,558 @@ function exportDetectionsCSV() {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
+}
+
+// ============ 3D Viewer Functions ============
+
+async function check3DStatus() {
+    try {
+        const response = await fetch('/api/3d-status');
+        const data = await response.json();
+        is3DAvailable = data.available;
+        console.log('3D Status:', data.message);
+    } catch (error) {
+        is3DAvailable = false;
+        console.log('3D not available:', error);
+    }
+}
+
+async function check3DExists(det) {
+    const response = await fetch('/api/check-3d', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            image_name: currentImage,
+            bbox: det.bbox,
+            detection_id: String(det.id || '0')
+        })
+    });
+    if (!response.ok) throw new Error('Check failed');
+    return await response.json();
+}
+
+function setup3DEventListeners() {
+    const generate3dBtn = document.getElementById('generate-3d-btn');
+    const toggle3dBtn = document.getElementById('toggle-3d-btn');
+
+    if (generate3dBtn) {
+        // Left click - view/generate
+        generate3dBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            generate3DModel(false);
+        });
+        // Right click - force regenerate
+        generate3dBtn.addEventListener('contextmenu', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            if (generate3dBtn.dataset.cached === 'true') {
+                if (confirm('Rigenerare il modello 3D? (sovrascriverà quello esistente)')) {
+                    generate3DModel(true); // force = true
+                }
+            }
+        });
+    }
+
+    if (toggle3dBtn) {
+        toggle3dBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            toggle3DView();
+        });
+    }
+}
+
+async function generate3DModel(force = false) {
+    const btn = document.getElementById('generate-3d-btn');
+    if (!currentModalDetection || !currentImage) return;
+
+    // If cached and not forcing, just load the existing PLY
+    const isCached = btn.dataset.cached === 'true';
+    const cachedUrl = btn.dataset.plyUrl;
+
+    if (isCached && !force && cachedUrl) {
+        btn.disabled = true;
+        btn.textContent = 'Caricamento...';
+
+        try {
+            console.log('Loading cached 3D from:', cachedUrl);
+            currentPlyUrl = cachedUrl;
+            await init3DViewer(currentPlyUrl);
+            console.log('3D viewer initialized successfully');
+
+            document.getElementById('toggle-3d-btn').style.display = 'inline-block';
+            btn.textContent = 'Rigenera 3D';
+            btn.disabled = false;
+            console.log('About to toggle 3D view');
+            modalCloseBlocked = true;
+            toggle3DView(true);
+            console.log('3D view toggled');
+            setTimeout(() => {
+                modalCloseBlocked = false;
+                console.log('Modal close unblocked');
+            }, 500);
+            return;
+        } catch (error) {
+            console.error('Error loading cached 3D:', error);
+            // Fall through to regenerate
+        }
+    }
+
+    btn.disabled = true;
+    btn.textContent = 'Generazione...';
+
+    try {
+        const response = await fetch('/api/generate-3d', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                image_name: currentImage,
+                bbox: currentModalDetection.bbox,
+                detection_id: String(currentModalDetection.id || '0'),
+                force: force
+            })
+        });
+
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.detail || 'Generation failed');
+        }
+
+        const data = await response.json();
+        currentPlyUrl = data.ply_url;
+
+        // Initialize 3D viewer
+        await init3DViewer(currentPlyUrl);
+
+        // Show toggle button
+        document.getElementById('toggle-3d-btn').style.display = 'inline-block';
+        btn.textContent = 'Rigenera 3D';
+        btn.dataset.cached = 'true';
+        btn.dataset.plyUrl = data.ply_url;
+
+        // Auto-switch to 3D view
+        toggle3DView(true);
+
+    } catch (error) {
+        console.error('3D generation error:', error);
+        btn.textContent = 'Errore';
+        alert('Errore generazione 3D: ' + error.message);
+        setTimeout(() => {
+            // Restore appropriate button text
+            btn.textContent = btn.dataset.cached === 'true' ? 'Visualizza 3D' : 'Genera 3D';
+            btn.disabled = false;
+        }, 2000);
+    }
+}
+
+// Parse Gaussian Splat PLY file and extract positions + colors
+async function parseGaussianSplatPLY(url) {
+    const response = await fetch(url);
+    const arrayBuffer = await response.arrayBuffer();
+    const dataView = new DataView(arrayBuffer);
+    const decoder = new TextDecoder();
+
+    // Find end of header
+    let headerEnd = 0;
+    const bytes = new Uint8Array(arrayBuffer);
+    for (let i = 0; i < Math.min(bytes.length, 10000); i++) {
+        if (bytes[i] === 0x65 && bytes[i+1] === 0x6e && bytes[i+2] === 0x64 &&
+            bytes[i+3] === 0x5f && bytes[i+4] === 0x68 && bytes[i+5] === 0x65 &&
+            bytes[i+6] === 0x61 && bytes[i+7] === 0x64 && bytes[i+8] === 0x65 &&
+            bytes[i+9] === 0x72) {  // "end_header"
+            headerEnd = i + 11;  // Skip "end_header\n"
+            break;
+        }
+    }
+
+    // Parse header
+    const headerText = decoder.decode(bytes.slice(0, headerEnd));
+    console.log('PLY Header:', headerText);
+
+    // Extract vertex count
+    const vertexMatch = headerText.match(/element vertex (\d+)/);
+    const vertexCount = vertexMatch ? parseInt(vertexMatch[1]) : 0;
+    console.log('Vertex count:', vertexCount);
+
+    // Parse properties and build byte offsets
+    const properties = [];
+    const propRegex = /property (\w+) (\w+)/g;
+    let match;
+    let offset = 0;
+    const typeSize = { float: 4, uchar: 1, int: 4, double: 8 };
+
+    while ((match = propRegex.exec(headerText)) !== null) {
+        const type = match[1];
+        const name = match[2];
+        properties.push({ name, type, offset });
+        offset += typeSize[type] || 4;
+    }
+    const vertexSize = offset;
+    console.log('Properties:', properties.map(p => p.name).join(', '));
+    console.log('Vertex size:', vertexSize, 'bytes');
+
+    // Find property indices
+    const getPropOffset = (name) => {
+        const prop = properties.find(p => p.name === name);
+        return prop ? prop.offset : -1;
+    };
+
+    const xOffset = getPropOffset('x');
+    const yOffset = getPropOffset('y');
+    const zOffset = getPropOffset('z');
+    const fdc0Offset = getPropOffset('f_dc_0');
+    const fdc1Offset = getPropOffset('f_dc_1');
+    const fdc2Offset = getPropOffset('f_dc_2');
+    const opacityOffset = getPropOffset('opacity');
+
+    console.log('Offsets - x:', xOffset, 'y:', yOffset, 'z:', zOffset,
+                'f_dc_0:', fdc0Offset, 'f_dc_1:', fdc1Offset, 'f_dc_2:', fdc2Offset,
+                'opacity:', opacityOffset);
+
+    // Read vertex data
+    const positions = new Float32Array(vertexCount * 3);
+    const colors = new Float32Array(vertexCount * 3);
+
+    // Spherical harmonics C0 coefficient
+    const SH_C0 = 0.28209479177387814;
+
+    let dataOffset = headerEnd;
+    for (let i = 0; i < vertexCount; i++) {
+        const base = dataOffset + i * vertexSize;
+
+        // Position
+        positions[i * 3] = dataView.getFloat32(base + xOffset, true);
+        positions[i * 3 + 1] = dataView.getFloat32(base + yOffset, true);
+        positions[i * 3 + 2] = dataView.getFloat32(base + zOffset, true);
+
+        // Color from spherical harmonics DC component
+        // RGB = 0.5 + C0 * f_dc (clamped to [0, 1])
+        if (fdc0Offset >= 0) {
+            const f_dc_0 = dataView.getFloat32(base + fdc0Offset, true);
+            const f_dc_1 = dataView.getFloat32(base + fdc1Offset, true);
+            const f_dc_2 = dataView.getFloat32(base + fdc2Offset, true);
+
+            colors[i * 3] = Math.max(0, Math.min(1, 0.5 + SH_C0 * f_dc_0));
+            colors[i * 3 + 1] = Math.max(0, Math.min(1, 0.5 + SH_C0 * f_dc_1));
+            colors[i * 3 + 2] = Math.max(0, Math.min(1, 0.5 + SH_C0 * f_dc_2));
+        } else {
+            // Default white if no color data
+            colors[i * 3] = 1;
+            colors[i * 3 + 1] = 1;
+            colors[i * 3 + 2] = 1;
+        }
+    }
+
+    return { positions, colors, vertexCount };
+}
+
+async function init3DViewer(plyUrl) {
+    const container = document.getElementById('modal-3d-container');
+    const canvas2d = document.getElementById('modal-canvas');
+
+    // Cleanup previous viewer
+    cleanup3DViewer();
+
+    // Show 3D container FIRST (so we can get dimensions)
+    canvas2d.style.display = 'none';
+    container.style.display = 'flex';
+    container.style.justifyContent = 'center';
+    container.style.alignItems = 'center';
+
+    // Set container size explicitly
+    const width = 700;
+    const height = 500;
+    container.style.width = width + 'px';
+    container.style.height = height + 'px';
+
+    // Create scene
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x00ff00);  // Bright green for debug
+
+    // Add axes helper to verify rendering
+    const axesHelper = new THREE.AxesHelper(2);
+    scene.add(axesHelper);
+    console.log('Scene created with green background and axes helper');
+
+    // Create camera with explicit dimensions
+    const camera = new THREE.PerspectiveCamera(50, width / height, 0.1, 1000);
+    camera.position.set(0, 0, 3);
+
+    // Create renderer with explicit dimensions
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(width, height);
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.domElement.style.border = '3px solid red';  // Debug: visible border
+    renderer.domElement.style.display = 'block';
+    container.appendChild(renderer.domElement);
+    console.log('WebGL canvas appended to container');
+
+    // Add orbit controls
+    const controls = new THREE.OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.05;
+    controls.autoRotate = true;
+    controls.autoRotateSpeed = 2;
+
+    // Add lights (for potential mesh rendering)
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+    scene.add(ambientLight);
+
+    const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+    directionalLight.position.set(5, 5, 5);
+    scene.add(directionalLight);
+
+    // Animation loop - start immediately
+    let animationId;
+    let frameCount = 0;
+    function animate() {
+        animationId = requestAnimationFrame(animate);
+        controls.update();
+        renderer.render(scene, camera);
+        frameCount++;
+        if (frameCount <= 3) {
+            console.log('Animation frame', frameCount, 'rendered');
+        }
+    }
+    animate();
+    console.log('Animation loop started');
+
+    // Store references for cleanup
+    current3DViewer = { scene, camera, renderer, animationId };
+    current3DControls = controls;
+
+    try {
+        // Parse Gaussian Splat PLY with custom parser
+        console.log('Loading Gaussian Splat PLY:', plyUrl);
+        const { positions, colors, vertexCount } = await parseGaussianSplatPLY(plyUrl);
+
+        console.log('Parsed', vertexCount, 'vertices');
+
+        // Debug: check position values
+        let posMinX = Infinity, posMaxX = -Infinity;
+        let posMinY = Infinity, posMaxY = -Infinity;
+        let posMinZ = Infinity, posMaxZ = -Infinity;
+        let nanCount = 0;
+        for (let i = 0; i < vertexCount; i++) {
+            const x = positions[i * 3];
+            const y = positions[i * 3 + 1];
+            const z = positions[i * 3 + 2];
+            if (isNaN(x) || isNaN(y) || isNaN(z)) nanCount++;
+            posMinX = Math.min(posMinX, x); posMaxX = Math.max(posMaxX, x);
+            posMinY = Math.min(posMinY, y); posMaxY = Math.max(posMaxY, y);
+            posMinZ = Math.min(posMinZ, z); posMaxZ = Math.max(posMaxZ, z);
+        }
+        console.log('Position ranges - X:', posMinX.toFixed(2), 'to', posMaxX.toFixed(2),
+                    'Y:', posMinY.toFixed(2), 'to', posMaxY.toFixed(2),
+                    'Z:', posMinZ.toFixed(2), 'to', posMaxZ.toFixed(2));
+        console.log('NaN positions:', nanCount);
+
+        // Debug: check color values
+        let colorSum = 0;
+        let minColor = 1, maxColor = 0;
+        for (let i = 0; i < Math.min(vertexCount, 1000) * 3; i++) {
+            colorSum += colors[i];
+            minColor = Math.min(minColor, colors[i]);
+            maxColor = Math.max(maxColor, colors[i]);
+        }
+        console.log('Color stats - avg:', (colorSum / Math.min(vertexCount, 1000) / 3).toFixed(3),
+                    'min:', minColor.toFixed(3), 'max:', maxColor.toFixed(3));
+
+        // Create geometry
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+        // Center and scale
+        geometry.computeBoundingBox();
+        const center = new THREE.Vector3();
+        geometry.boundingBox.getCenter(center);
+        console.log('Center:', center.x.toFixed(2), center.y.toFixed(2), center.z.toFixed(2));
+
+        geometry.translate(-center.x, -center.y, -center.z);
+
+        // Recompute after centering
+        geometry.computeBoundingBox();
+        const size = new THREE.Vector3();
+        geometry.boundingBox.getSize(size);
+        const maxDim = Math.max(size.x, size.y, size.z);
+        console.log('Size:', size.x.toFixed(2), size.y.toFixed(2), size.z.toFixed(2), 'Max:', maxDim.toFixed(2));
+
+        if (maxDim > 0) {
+            const scale = 2 / maxDim;
+            geometry.scale(scale, scale, scale);
+        }
+
+        // Calculate point size based on density - use larger size for visibility
+        const pointSize = 0.05;  // Fixed large size for debug
+        console.log('Point size:', pointSize);
+
+        // Create point cloud with vertex colors
+        const material = new THREE.PointsMaterial({
+            size: pointSize,
+            vertexColors: true,
+            sizeAttenuation: true
+        });
+
+        const points = new THREE.Points(geometry, material);
+        scene.add(points);
+        console.log('Points added to scene:', vertexCount);
+
+        // Debug: add a red cube to verify rendering works
+        const debugCube = new THREE.Mesh(
+            new THREE.BoxGeometry(0.1, 0.1, 0.1),
+            new THREE.MeshBasicMaterial({ color: 0xff0000 })
+        );
+        scene.add(debugCube);
+        console.log('Debug cube added at origin');
+
+        // Debug: verify renderer is working
+        console.log('Renderer canvas size:', renderer.domElement.width, 'x', renderer.domElement.height);
+        console.log('Container display:', getComputedStyle(container).display);
+
+        // Force a render now that everything is added
+        renderer.render(scene, camera);
+        console.log('Forced render complete');
+
+        // Check WebGL context
+        const gl = renderer.getContext();
+        console.log('WebGL context valid:', gl !== null);
+        console.log('WebGL error:', gl.getError());
+
+        // Check if data is flat (2D-ish) and position camera accordingly
+        const isFlat = size.z < size.x * 0.1 && size.z < size.y * 0.1;
+        console.log('Is flat:', isFlat, 'Z ratio:', (size.z / Math.max(size.x, size.y)).toFixed(3));
+
+        if (isFlat) {
+            // Data is flat on XY plane, view from above
+            camera.position.set(0, 0, 3);
+        } else {
+            // 3D data, view from angle
+            camera.position.set(2, 1.5, 2);
+        }
+        camera.lookAt(0, 0, 0);
+        controls.target.set(0, 0, 0);
+        controls.update();
+
+    } catch (error) {
+        console.error('Error loading Gaussian Splat PLY:', error);
+        // Show error in container
+        const errorMsg = document.createElement('div');
+        errorMsg.style.color = '#ff6666';
+        errorMsg.style.padding = '20px';
+        errorMsg.textContent = 'Error loading 3D model: ' + error.message;
+        container.appendChild(errorMsg);
+    }
+}
+
+function cleanup3DViewer() {
+    const container = document.getElementById('modal-3d-container');
+
+    if (current3DViewer) {
+        // Stop animation
+        if (current3DViewer.animationId) {
+            cancelAnimationFrame(current3DViewer.animationId);
+        }
+
+        // Dispose renderer
+        if (current3DViewer.renderer) {
+            current3DViewer.renderer.dispose();
+        }
+
+        // Clear scene
+        if (current3DViewer.scene) {
+            current3DViewer.scene.traverse((obj) => {
+                if (obj.geometry) obj.geometry.dispose();
+                if (obj.material) {
+                    if (Array.isArray(obj.material)) {
+                        obj.material.forEach(m => m.dispose());
+                    } else {
+                        obj.material.dispose();
+                    }
+                }
+            });
+        }
+
+        current3DViewer = null;
+    }
+
+    if (current3DControls) {
+        current3DControls.dispose();
+        current3DControls = null;
+    }
+
+    // Clear container
+    if (container) {
+        container.innerHTML = '';
+    }
+
+    currentPlyUrl = null;
+}
+
+function toggle3DView(show3D) {
+    const canvas2d = document.getElementById('modal-canvas');
+    const container3d = document.getElementById('modal-3d-container');
+    const toggleBtn = document.getElementById('toggle-3d-btn');
+
+    // If called without argument, toggle
+    if (typeof show3D !== 'boolean') {
+        show3D = container3d.style.display === 'none';
+    }
+
+    if (show3D && currentPlyUrl) {
+        canvas2d.style.display = 'none';
+        container3d.style.display = 'flex';
+        toggleBtn.textContent = '2D';
+    } else {
+        canvas2d.style.display = 'block';
+        container3d.style.display = 'none';
+        toggleBtn.textContent = '3D';
+    }
+}
+
+// ============ Panorama 360 Viewer ============
+
+/**
+ * Add 360 panorama button to image container
+ */
+function addPanoramaButton() {
+    const container = document.getElementById('image-container');
+
+    // Remove existing button if any
+    const existingBtn = container.querySelector('.open-panorama-btn');
+    if (existingBtn) {
+        existingBtn.remove();
+    }
+
+    // Create button
+    const btn = document.createElement('button');
+    btn.className = 'open-panorama-btn';
+    btn.innerHTML = '360°';
+    btn.title = 'Open 360° panoramic view';
+
+    btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        openPanoramaViewer();
+    });
+
+    container.appendChild(btn);
+}
+
+/**
+ * Open the panorama viewer with current image and detections
+ */
+function openPanoramaViewer() {
+    if (!currentImage) return;
+
+    // Check if panoramaViewer is initialized
+    if (window.panoramaViewer) {
+        // Pass current detections and image info to the viewer
+        window.panoramaViewer.open(currentImage, {
+            detections: detections,
+            allDetections: allDetections,
+            imageInfo: currentImageInfo,
+            colors: COLORS
+        });
+    } else {
+        console.error('PanoramaViewer not initialized');
+    }
 }

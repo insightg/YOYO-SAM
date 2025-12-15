@@ -143,7 +143,7 @@ def classify_traffic_signs_batch(images: list[Image.Image], batch_size: int = 16
         batch_size: Maximum batch size to avoid OOM
 
     Returns:
-        List of (class_label, confidence) tuples
+        List of (class_label, confidence) tuples - label only, not prefixed
     """
     if not images:
         return []
@@ -178,7 +178,8 @@ def classify_traffic_signs_batch(images: list[Image.Image], batch_size: int = 16
 def batch_analyze_detections(
     image: Image.Image,
     detections: list[dict],
-    base_class: str
+    base_class: str,
+    module: str = "auto"
 ) -> list[tuple[str, float]]:
     """
     Analyze multiple detections from the same image in batch.
@@ -187,6 +188,7 @@ def batch_analyze_detections(
         image: PIL Image (already loaded)
         detections: List of detection dicts with bbox
         base_class: The base class name
+        module: Explicit module name ("GTSRB", "RDD") or "auto" for auto-detect
 
     Returns:
         List of (class_label, confidence) tuples
@@ -197,17 +199,19 @@ def batch_analyze_detections(
     # Pre-crop all detections
     crops = [crop_detection(image, det["bbox"]) for det in detections]
 
-    # Route to appropriate batch classifier
-    if is_crack_class(base_class):
+    # Route to appropriate batch classifier based on explicit module or auto-detect
+    if module == "RDD" or (module == "auto" and is_crack_class(base_class)):
         return classify_cracks_batch(crops)
     else:
+        # Default to GTSRB for traffic signs
         return classify_traffic_signs_batch(crops)
 
 
 def local_analyze_detection(
     image_path: Path,
     detection: dict,
-    base_class: str
+    base_class: str,
+    module: str = "auto"
 ) -> tuple[str, float]:
     """
     Perform local analysis on a detection, routing to appropriate model.
@@ -219,13 +223,14 @@ def local_analyze_detection(
     Args:
         image_path: Path to the full image
         detection: Detection dict with bbox
-        base_class: The base class name (without "- local" suffix)
+        base_class: The base class name (without suffix)
+        module: Explicit module ("GTSRB", "RDD") or "auto" for auto-detect
 
     Returns:
         (new_class_name, classification_confidence)
     """
-    # Route to RDD model for crack/pothole classes
-    if is_crack_class(base_class):
+    # Route to RDD model if explicitly requested or auto-detected
+    if module == "RDD" or (module == "auto" and is_crack_class(base_class)):
         return crack_analyze_detection(image_path, detection, base_class)
 
     # Default: use GTSRB for traffic signs
@@ -237,7 +242,7 @@ def local_analyze_detection(
         # Classify with GTSRB model
         label, confidence = classify_traffic_sign(cropped)
 
-        # Format: base_class.subclass
+        # Format: base_class.subclass (es. road_sign.limite_velocita_50)
         base_clean = base_class.replace(" ", "_").lower()
         return f"{base_clean}.{label}", confidence
 
@@ -247,17 +252,36 @@ def local_analyze_detection(
         return f"{base_clean}.errore", 0.0
 
 
-def is_local_class(class_name: str) -> tuple[bool, str]:
+def is_local_class(class_name: str) -> tuple[bool, str, str]:
     """
     Check if a class requires local analysis.
 
+    Supported suffixes:
+    - "- GTSRB" for traffic signs (German Traffic Sign Recognition)
+    - "- RDD" for road damage detection (cracks, potholes)
+    - "- local" (legacy, auto-routes based on class name)
+
     Returns:
-        (is_local, base_class_name)
+        (is_local, base_class_name, module_name)
+        module_name is "GTSRB", "RDD", or "auto" for legacy local
     """
-    if class_name.strip().lower().endswith("- local"):
+    name_lower = class_name.strip().lower()
+
+    # Check for specific module names
+    if name_lower.endswith("- gtsrb"):
         base_class = class_name.rsplit("-", 1)[0].strip()
-        return True, base_class
-    return False, class_name
+        return True, base_class, "GTSRB"
+
+    if name_lower.endswith("- rdd"):
+        base_class = class_name.rsplit("-", 1)[0].strip()
+        return True, base_class, "RDD"
+
+    # Legacy support for "- local" (auto-detect based on class name)
+    if name_lower.endswith("- local"):
+        base_class = class_name.rsplit("-", 1)[0].strip()
+        return True, base_class, "auto"
+
+    return False, class_name, ""
 
 
 if __name__ == "__main__":
@@ -266,15 +290,18 @@ if __name__ == "__main__":
 
     # Test class detection
     test_classes = [
-        "road sign - local",
-        "traffic sign - local",
-        "stop sign",
-        "speed limit sign - deep"
+        "road sign - local",      # legacy, auto-detect
+        "traffic sign - GTSRB",   # explicit GTSRB
+        "road crack - RDD",       # explicit RDD
+        "pothole - RDD",          # explicit RDD
+        "stop sign",              # no suffix
+        "speed limit sign - deep" # deep analysis
     ]
 
+    print("\nTest is_local_class():")
     for cls in test_classes:
-        is_local, base = is_local_class(cls)
-        print(f"  {cls} -> local={is_local}, base='{base}'")
+        is_local, base, module = is_local_class(cls)
+        print(f"  {cls} -> local={is_local}, base='{base}', module='{module}'")
 
     # Test model loading
     print("\nLoading model...")

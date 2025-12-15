@@ -5,6 +5,10 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SAM3 Object Detection</title>
     <link rel="stylesheet" href="/static/style.css">
+    <!-- Three.js for 3D viewer (using older version with global THREE) -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/PLYLoader.js"></script>
 </head>
 <body>
     <div class="container">
@@ -156,10 +160,15 @@ sidewalk</textarea>
         <div class="modal-content">
             <div class="modal-header">
                 <h3 id="modal-title">Detection</h3>
+                <div class="modal-actions">
+                    <button id="generate-3d-btn" class="btn-3d" style="display: none;">Genera 3D</button>
+                    <button id="toggle-3d-btn" class="btn-3d" style="display: none;">2D / 3D</button>
+                </div>
                 <button class="modal-close" id="modal-close">&times;</button>
             </div>
             <div class="modal-body">
                 <canvas id="modal-canvas"></canvas>
+                <div id="modal-3d-container" style="display: none;"></div>
             </div>
             <div class="modal-footer">
                 <span id="modal-info"></span>
@@ -167,6 +176,43 @@ sidewalk</textarea>
         </div>
     </div>
 
+    <!-- Panoramic 360 Viewer -->
+    <div id="panorama-viewer" class="panorama-viewer" style="display: none;">
+        <div class="panorama-close-btn" id="panorama-close" title="Close (Esc)">&times;</div>
+
+        <!-- 3D Sphere Container -->
+        <div id="panorama-container" class="panorama-container"></div>
+
+        <!-- Navigation Arrows -->
+        <div class="panorama-nav">
+            <button id="nav-prev" class="nav-arrow nav-prev" title="Previous (Left arrow)">&larr;</button>
+            <button id="nav-next" class="nav-arrow nav-next" title="Next (Right arrow)">&rarr;</button>
+        </div>
+
+        <!-- Info Panel -->
+        <div class="panorama-info">
+            <span id="panorama-name" class="panorama-name"></span>
+            <span id="panorama-gps" class="panorama-gps"></span>
+            <span id="panorama-index" class="panorama-index"></span>
+        </div>
+
+        <!-- Mini-map -->
+        <div class="panorama-minimap" id="panorama-minimap">
+            <canvas id="minimap-canvas" width="250" height="200"></canvas>
+            <div class="minimap-controls">
+                <button id="minimap-zoom-in" class="minimap-btn">+</button>
+                <button id="minimap-zoom-out" class="minimap-btn">-</button>
+            </div>
+        </div>
+
+        <!-- Loading indicator -->
+        <div class="panorama-loading" id="panorama-loading">
+            <div class="pano-spinner"></div>
+            <span>Loading panorama...</span>
+        </div>
+    </div>
+
+    <script src="/static/panorama-viewer.js"></script>
     <script src="/static/app.js"></script>
 </body>
 </html>
