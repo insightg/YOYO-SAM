@@ -188,7 +188,7 @@ def batch_analyze_detections(
         image: PIL Image (already loaded)
         detections: List of detection dicts with bbox
         base_class: The base class name
-        module: Explicit module name ("GTSRB", "RDD") or "auto" for auto-detect
+        module: Explicit module name ("GTSRB", "RDD", "OCR") or "auto" for auto-detect
 
     Returns:
         List of (class_label, confidence) tuples
@@ -200,7 +200,10 @@ def batch_analyze_detections(
     crops = [crop_detection(image, det["bbox"]) for det in detections]
 
     # Route to appropriate batch classifier based on explicit module or auto-detect
-    if module == "RDD" or (module == "auto" and is_crack_class(base_class)):
+    if module == "OCR":
+        from ocr_analyze import extract_text_batch
+        return extract_text_batch(crops)
+    elif module == "RDD" or (module == "auto" and is_crack_class(base_class)):
         return classify_cracks_batch(crops)
     else:
         # Default to GTSRB for traffic signs
@@ -217,6 +220,7 @@ def local_analyze_detection(
     Perform local analysis on a detection, routing to appropriate model.
 
     Routes to:
+    - OCR (EasyOCR) for text extraction
     - RDD2022 (YOLOv8) for cracks, potholes, road damage
     - GTSRB (ViT) for traffic signs (default)
 
@@ -224,11 +228,16 @@ def local_analyze_detection(
         image_path: Path to the full image
         detection: Detection dict with bbox
         base_class: The base class name (without suffix)
-        module: Explicit module ("GTSRB", "RDD") or "auto" for auto-detect
+        module: Explicit module ("GTSRB", "RDD", "OCR") or "auto" for auto-detect
 
     Returns:
         (new_class_name, classification_confidence)
     """
+    # Route to OCR if explicitly requested
+    if module == "OCR":
+        from ocr_analyze import ocr_analyze_detection
+        return ocr_analyze_detection(image_path, detection, base_class)
+
     # Route to RDD model if explicitly requested or auto-detected
     if module == "RDD" or (module == "auto" and is_crack_class(base_class)):
         return crack_analyze_detection(image_path, detection, base_class)
@@ -279,11 +288,12 @@ def is_local_class(class_name: str) -> tuple[bool, str, str, float | None]:
     Supported suffixes:
     - "- GTSRB" for traffic signs (German Traffic Sign Recognition)
     - "- RDD" for road damage detection (cracks, potholes)
+    - "- OCR" for text extraction (alphanumeric)
     - "- local" (legacy, auto-routes based on class name)
 
     Returns:
         (is_local, base_class_name, module_name, threshold_or_none)
-        module_name is "GTSRB", "RDD", or "auto" for legacy local
+        module_name is "GTSRB", "RDD", "OCR", or "auto" for legacy local
     """
     # First extract threshold prefix if present
     name, threshold = parse_threshold_prefix(class_name)
@@ -297,6 +307,10 @@ def is_local_class(class_name: str) -> tuple[bool, str, str, float | None]:
     if name_lower.endswith("- rdd"):
         base_class = name.rsplit("-", 1)[0].strip()
         return True, base_class, "RDD", threshold
+
+    if name_lower.endswith("- ocr"):
+        base_class = name.rsplit("-", 1)[0].strip()
+        return True, base_class, "OCR", threshold
 
     # Legacy support for "- local" (auto-detect based on class name)
     if name_lower.endswith("- local"):

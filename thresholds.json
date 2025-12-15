@@ -1,8 +1,23 @@
 {
   "__parent__road sign": 0.8,
-  "road_sign.direzione_obbligatoria_dritto": 0.8,
-  "road_sign.passaggio_obbligatorio_destra": 0.8,
-  "road_sign.strada_prioritaria": 0.8,
   "__parent__pothole": 0.45,
-  "pothole": 0.45
+  "__parent__Bar/refreshment kiosk": 0.8,
+  "__parent__Billboard structures": 0.8,
+  "__parent__Flower beds/planters": 0.3,
+  "__parent__Hedges": 0.9,
+  "__parent__Information signs (square/rectangular blue)": 0.4,
+  "__parent__Light towers": 0.15,
+  "__parent__Parks/gardens": 0.9,
+  "__parent__Pavement cracks": 0.25,
+  "__parent__Pavement depressions": 0.35,
+  "__parent__Pavement patches": 0.45,
+  "__parent__Pedestrian traffic lights": 0.85,
+  "__parent__Potholes": 0.35,
+  "__parent__Road barriers": 0.3,
+  "__parent__Trash bins": 0.65,
+  "__parent__Tall trees": 0.4,
+  "__parent__Tower clocks": 0.9,
+  "__parent__Directional arrows": 0.2,
+  "__parent__street crack": 0.1,
+  "street crack": 0.1
 }

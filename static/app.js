@@ -971,11 +971,14 @@ function showDetectionsList() {
         const item = document.createElement('div');
         item.className = 'detection-item';
 
-        // Build GPS info if available
+        // Build GPS info if available (check both formats: det.latitude or det.gps.lat)
         let gpsInfo = '';
-        if (det.latitude && det.longitude) {
-            const distInfo = det.distance_m ? `${det.distance_m}m` : '?';
-            gpsInfo = `<span class="detection-gps" title="${det.latitude.toFixed(6)}, ${det.longitude.toFixed(6)}">${distInfo}</span>`;
+        const gpsLat = det.latitude ?? det.gps?.lat;
+        const gpsLon = det.longitude ?? det.gps?.lon;
+        if (gpsLat && gpsLon) {
+            const distInfo = det.distance_m ? `${det.distance_m}m` : '';
+            const mapsUrl = `https://www.google.com/maps?q=${gpsLat},${gpsLon}`;
+            gpsInfo = `<a href="${mapsUrl}" target="_blank" class="detection-gps" title="${gpsLat.toFixed(6)}, ${gpsLon.toFixed(6)}">📍${distInfo}</a>`;
         }
 
         // Analysis indicator (deep = LLM, local = GTSRB/RDD model)
@@ -1345,12 +1348,20 @@ function openDetectionModal(index) {
         const detId = det.id || (index + 1);
         modalTitle.textContent = `#${detId} - ${det.class} (${(det.score * 100).toFixed(1)}%)`;
 
-        // Build info text with GPS if available
+        // Build info text with GPS if available (check both formats)
+        const gpsLat = det.latitude ?? det.gps?.lat;
+        const gpsLon = det.longitude ?? det.gps?.lon;
         let infoText = `Size: ${Math.round(cropWidth)} x ${Math.round(cropHeight)} px`;
 
-        if (det.latitude && det.longitude) {
-            infoText += ` | Distance: ~${det.distance_m}m | Bearing: ${det.bearing_deg}°`;
-            infoText += `<br><span class="modal-gps">GPS: <a href="https://www.google.com/maps?q=${det.latitude},${det.longitude}" target="_blank">${det.latitude.toFixed(6)}, ${det.longitude.toFixed(6)}</a></span>`;
+        if (gpsLat && gpsLon) {
+            if (det.distance_m) {
+                infoText += ` | Distance: ~${det.distance_m}m`;
+            }
+            if (det.bearing_deg) {
+                infoText += ` | Bearing: ${det.bearing_deg}°`;
+            }
+            const mapsUrl = `https://www.google.com/maps?q=${gpsLat},${gpsLon}`;
+            infoText += `<br><span class="modal-gps">📍 GPS: <a href="${mapsUrl}" target="_blank">${gpsLat.toFixed(6)}, ${gpsLon.toFixed(6)}</a></span>`;
         }
 
         modalInfo.innerHTML = infoText;
@@ -1481,12 +1492,20 @@ window.openDetectionModalFor = function(det, imageName, imageWidth, imageHeight,
         const detId = det.id || 0;
         modalTitle.textContent = `#${detId} - ${det.class} (${(det.score * 100).toFixed(1)}%)`;
 
-        // Build info text with GPS if available
+        // Build info text with GPS if available (check both formats)
+        const gpsLat = det.latitude ?? det.gps?.lat;
+        const gpsLon = det.longitude ?? det.gps?.lon;
         let infoText = `Size: ${Math.round(cropWidth)} x ${Math.round(cropHeight)} px`;
 
-        if (det.latitude && det.longitude) {
-            infoText += ` | Distance: ~${det.distance_m}m | Bearing: ${det.bearing_deg}°`;
-            infoText += `<br><span class="modal-gps">GPS: <a href="https://www.google.com/maps?q=${det.latitude},${det.longitude}" target="_blank">${det.latitude.toFixed(6)}, ${det.longitude.toFixed(6)}</a></span>`;
+        if (gpsLat && gpsLon) {
+            if (det.distance_m) {
+                infoText += ` | Distance: ~${det.distance_m}m`;
+            }
+            if (det.bearing_deg) {
+                infoText += ` | Bearing: ${det.bearing_deg}°`;
+            }
+            const mapsUrl = `https://www.google.com/maps?q=${gpsLat},${gpsLon}`;
+            infoText += `<br><span class="modal-gps">📍 GPS: <a href="${mapsUrl}" target="_blank">${gpsLat.toFixed(6)}, ${gpsLon.toFixed(6)}</a></span>`;
         }
 
         modalInfo.innerHTML = infoText;

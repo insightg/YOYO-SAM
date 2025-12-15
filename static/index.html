@@ -100,26 +100,24 @@
             </div>
 
             <div class="control-group classes-group">
-                <label for="classes">Classes (one per line) <small class="deep-hint">"30 ..." = soglia | "- deep" = LLM | "- local" = GTSRB</small></label>
-                <textarea id="classes" rows="15">30 road sign - local
-40 yield sign
-40 speed limit sign
-30 traffic light
-street light pole
-light pole
-manhole cover
-road marking
-crosswalk
-pedestrian crossing
-no parking sign
-one way sign
-parking sign
-fire hydrant
-traffic cone
-road barrier
-guardrail
-curb
-sidewalk</textarea>
+                <label for="classes">Classes (CSV: soglia,label,descrizione,moduli) <small class="deep-hint">moduli: ocr, gtsrb, rdd, deep</small></label>
+                <textarea id="classes" rows="15">30,Cartello_stradale,road sign,gtsrb
+40,Dare_precedenza,yield sign,
+40,Limite_velocita,speed limit sign,
+30,Semaforo,traffic light,
+,Lampione,street light pole,
+,Palo_luce,light pole,
+,Tombino,manhole cover,
+,Segnaletica_orizzontale,road marking,
+,Strisce_pedonali,crosswalk,
+,Attraversamento,pedestrian crossing,
+,Divieto_sosta,no parking sign,
+,Senso_unico,one way sign,
+,Parcheggio,parking sign,
+,Idrante,fire hydrant,
+,Cono_stradale,traffic cone,
+,Barriera,road barrier,
+,Guardrail,guardrail,</textarea>
             </div>
 
             <div class="button-group">

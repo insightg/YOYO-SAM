@@ -54,31 +54,104 @@ DETECTIONS_DIR = Path(__file__).parent / "detections"
 DETECTIONS_DIR.mkdir(exist_ok=True)
 THRESHOLDS_FILE = Path(__file__).parent / "thresholds.json"
 THUMBNAIL_SIZE = 150
-DEFAULT_CLASSES = """stop sign
-yield sign
-speed limit sign
-traffic light
-street light pole
-light pole
-manhole cover
-road marking
-crosswalk
-pedestrian crossing
-no parking sign
-one way sign
-road sign
-parking sign
-fire hydrant
-traffic cone
-road barrier
-guardrail
-curb
-sidewalk"""
+DEFAULT_CLASSES = """30,Cartello_stradale,road sign,gtsrb
+40,Dare_precedenza,yield sign,
+40,Limite_velocita,speed limit sign,
+30,Semaforo,traffic light,
+,Lampione,street light pole,
+,Palo_luce,light pole,
+,Tombino,manhole cover,
+,Segnaletica_orizzontale,road marking,
+,Strisce_pedonali,crosswalk,
+,Attraversamento,pedestrian crossing,
+,Divieto_sosta,no parking sign,
+,Senso_unico,one way sign,
+,Parcheggio,parking sign,
+,Idrante,fire hydrant,
+,Cono_stradale,traffic cone,
+,Barriera,road barrier,
+,Guardrail,guardrail,"""
 
 # Global model (loaded once)
 _processor: Optional[Sam3Processor] = None
 _model_loading = False
 _text_embeddings_cache: dict = {}  # Cache for text embeddings
+
+
+def parse_csv_class(csv_line: str) -> dict:
+    """
+    Parse CSV class format: threshold,label,description,modules
+
+    Examples:
+        "30,Passo_carrabile,no parking sign,ocr"
+        "50,Limite_velocita,speed limit sign,ocr,deep"
+        ",Street_light,street light pole,"  (no threshold, no modules)
+
+    Returns:
+        {
+            "threshold": 0.30 or None,
+            "label": "Passo_carrabile",
+            "description": "no parking sign",
+            "modules": ["ocr"] or []
+        }
+    """
+    parts = [p.strip() for p in csv_line.split(',')]
+
+    # Minimo 3 campi: threshold, label, description
+    if len(parts) < 3:
+        # Fallback: tratta come formato legacy
+        return parse_legacy_class(csv_line)
+
+    result = {
+        "threshold": None,
+        "label": parts[1] if parts[1] else parts[2].replace(' ', '_'),
+        "description": parts[2],
+        "modules": []
+    }
+
+    # Parse threshold (campo 1)
+    if parts[0] and parts[0].isdigit():
+        result["threshold"] = int(parts[0]) / 100.0
+
+    # Parse modules (campo 4+)
+    if len(parts) > 3:
+        modules = [m.strip().lower() for m in parts[3:] if m.strip()]
+        result["modules"] = modules
+
+    return result
+
+
+def parse_legacy_class(class_str: str) -> dict:
+    """Fallback per formato legacy (30 road sign - GTSRB)"""
+    from local_analyze import parse_threshold_prefix, is_local_class
+    from deep_analyze import is_deep_class
+
+    name, threshold = parse_threshold_prefix(class_str)
+
+    is_local, base, module, _ = is_local_class(class_str)
+    if is_local:
+        return {
+            "threshold": threshold,
+            "label": base,
+            "description": base,
+            "modules": [module.lower()] if module else []
+        }
+
+    is_deep, base, _ = is_deep_class(class_str)
+    if is_deep:
+        return {
+            "threshold": threshold,
+            "label": base,
+            "description": base,
+            "modules": ["deep"]
+        }
+
+    return {
+        "threshold": threshold,
+        "label": name,
+        "description": name,
+        "modules": []
+    }
 
 
 def get_processor() -> Sam3Processor:
@@ -558,42 +631,60 @@ async def detect(request: DetectRequest):
         raise HTTPException(status_code=400, detail="No classes provided")
 
     try:
-        # Separate deep/local analysis classes from regular classes
-        deep_classes = {}   # base_class -> True (LLM analysis)
-        local_classes = {}  # base_class -> module_name (GTSRB, RDD, or auto)
-        class_thresholds = {}  # base_class -> min_threshold (from "30 classname" format)
-        detection_classes = []
+        # Parse classes (support CSV and legacy formats)
+        local_classes = {}   # label -> module (OCR, GTSRB, RDD)
+        deep_classes = {}    # label -> True
+        class_thresholds = {}  # label -> min_threshold
+        detection_classes = []  # descriptions for SAM3
+        label_to_description = {}  # label -> description mapping
 
-        for cls in request.classes:
-            # Check for local analysis first (takes precedence)
-            is_local, base_class, module, threshold = is_local_class(cls)
-            if is_local:
-                local_classes[base_class] = module
-                detection_classes.append(base_class)
-                if threshold is not None:
-                    class_thresholds[base_class] = threshold
-                continue
+        for cls_config in request.classes:
+            parsed = parse_csv_class(cls_config)
 
-            # Check for deep (LLM) analysis
-            is_deep, base_class, threshold = is_deep_class(cls)
-            if is_deep:
-                deep_classes[base_class] = True
-                detection_classes.append(base_class)
-                if threshold is not None:
-                    class_thresholds[base_class] = threshold
-            else:
-                # Regular class (base_class is the full name without threshold)
-                detection_classes.append(base_class)
-                if threshold is not None:
-                    class_thresholds[base_class] = threshold
+            label = parsed["label"]
+            description = parsed["description"]
+            modules = parsed["modules"]
+            threshold = parsed["threshold"]
 
-        # Run detection with base classes
+            # Store mapping label -> description (for SAM3 prompt)
+            label_to_description[label] = description
+
+            # Route to appropriate module
+            if "ocr" in modules:
+                local_classes[label] = "OCR"
+            elif "gtsrb" in modules:
+                local_classes[label] = "GTSRB"
+            elif "rdd" in modules:
+                local_classes[label] = "RDD"
+            elif "local" in modules:
+                local_classes[label] = "auto"
+
+            if "deep" in modules:
+                deep_classes[label] = True
+
+            # Use DESCRIPTION for SAM3 detection, not label
+            detection_classes.append(description)
+
+            if threshold is not None:
+                class_thresholds[label] = threshold
+
+        # Create reverse mapping: description -> label
+        description_to_label = {v: k for k, v in label_to_description.items()}
+
+        # Run detection with descriptions (for SAM3)
         detections = detect_objects(
             image_path,
             detection_classes,
             request.confidence,
             request.tiles
         )
+
+        # Map back: detection["class"] = description -> label
+        for det in detections:
+            desc = det["class"]
+            if desc in description_to_label:
+                det["class"] = description_to_label[desc]
+                det["description"] = desc
 
         # Perform local analysis for marked classes (GTSRB/RDD model) - apply class threshold
         if local_classes:
@@ -619,15 +710,18 @@ async def detect(request: DetectRequest):
         # Perform deep analysis for marked classes (LLM) - apply class threshold or default 0.5
         if deep_classes:
             for det in detections:
-                if det["class"] in deep_classes:
+                # Use original_class (label) if available, otherwise current class
+                label = det.get("original_class", det["class"])
+                if label in deep_classes:
                     # Use class-specific threshold if set, otherwise default to 0.5
-                    min_threshold = class_thresholds.get(det["class"], 0.5)
+                    min_threshold = class_thresholds.get(label, 0.5)
                     if det.get("score", 0) >= min_threshold:
-                        det["original_class"] = det["class"]
+                        if "original_class" not in det:
+                            det["original_class"] = det["class"]
                         detailed_class = deep_analyze_detection(
                             image_path,
                             det,
-                            det["class"]
+                            label
                         )
                         det["class"] = detailed_class
                         det["deep_analyzed"] = True
@@ -710,32 +804,45 @@ async def detect_with_progress(image_name: str, classes: list[str], confidence: 
         yield {"type": "progress", "stage": "init", "message": "Inizializzazione...", "percent": 0}
         await asyncio.sleep(0.05)  # Small delay to allow UI update
 
-        # Parse classes
-        deep_classes = {}
-        local_classes = {}  # { base_class: module_name }
-        class_thresholds = {}  # base_class -> min_threshold (from "30 classname" format)
-        detection_classes = []
+        # Parse classes (support CSV and legacy formats)
+        local_classes = {}   # label -> module (OCR, GTSRB, RDD)
+        deep_classes = {}    # label -> True
+        class_thresholds = {}  # label -> min_threshold
+        detection_classes = []  # descriptions for SAM3
+        label_to_description = {}  # label -> description mapping
 
-        for cls in classes:
-            is_local, base_class, module, threshold = is_local_class(cls)
-            if is_local:
-                local_classes[base_class] = module  # Store module name (GTSRB, RDD, or auto)
-                detection_classes.append(base_class)
-                if threshold is not None:
-                    class_thresholds[base_class] = threshold
-                continue
+        for cls_config in classes:
+            parsed = parse_csv_class(cls_config)
 
-            is_deep, base_class, threshold = is_deep_class(cls)
-            if is_deep:
-                deep_classes[base_class] = True
-                detection_classes.append(base_class)
-                if threshold is not None:
-                    class_thresholds[base_class] = threshold
-            else:
-                # Regular class (base_class is the full name without threshold)
-                detection_classes.append(base_class)
-                if threshold is not None:
-                    class_thresholds[base_class] = threshold
+            label = parsed["label"]
+            description = parsed["description"]
+            modules = parsed["modules"]
+            threshold = parsed["threshold"]
+
+            # Store mapping label -> description (for SAM3 prompt)
+            label_to_description[label] = description
+
+            # Route to appropriate module
+            if "ocr" in modules:
+                local_classes[label] = "OCR"
+            elif "gtsrb" in modules:
+                local_classes[label] = "GTSRB"
+            elif "rdd" in modules:
+                local_classes[label] = "RDD"
+            elif "local" in modules:
+                local_classes[label] = "auto"
+
+            if "deep" in modules:
+                deep_classes[label] = True
+
+            # Use DESCRIPTION for SAM3 detection, not label
+            detection_classes.append(description)
+
+            if threshold is not None:
+                class_thresholds[label] = threshold
+
+        # Create reverse mapping: description -> label
+        description_to_label = {v: k for k, v in label_to_description.items()}
 
         # Step 2: Load model if needed
         yield {"type": "progress", "stage": "model", "message": "Caricamento modello SAM3...", "percent": 5}
@@ -904,6 +1011,13 @@ async def detect_with_progress(image_name: str, classes: list[str], confidence: 
         }
         await asyncio.sleep(0.05)
 
+        # Map detections from description back to label
+        for det in all_detections:
+            desc = det["class"]
+            if desc in description_to_label:
+                det["class"] = description_to_label[desc]
+                det["description"] = desc
+
         # Step 6: Local analysis (GTSRB/RDD) - BATCH PROCESSING - apply class threshold
         if local_classes:
             local_items = []
@@ -992,8 +1106,10 @@ async def detect_with_progress(image_name: str, classes: list[str], confidence: 
                     }
                     await asyncio.sleep(0.01)
 
-                    det["original_class"] = det["class"]
-                    detailed_class = deep_analyze_detection(image_path, det, det["class"])
+                    label = det.get("original_class", det["class"])
+                    if "original_class" not in det:
+                        det["original_class"] = det["class"]
+                    detailed_class = deep_analyze_detection(image_path, det, label)
                     det["class"] = detailed_class
                     det["deep_analyzed"] = True
 
