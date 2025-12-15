@@ -1287,7 +1287,7 @@ select:focus {
     border: 1px solid rgba(255, 255, 255, 0.15);
     border-radius: 8px;
     z-index: 100;
-    max-height: calc(100vh - 150px);
+    max-height: 70vh;
     overflow: hidden;
 }
 
@@ -1321,8 +1321,30 @@ select:focus {
 
 .panorama-controls-body {
     padding: 12px 15px;
-    max-height: 400px;
-    overflow-y: auto;
+    overflow-y: scroll !important;
+    max-height: calc(70vh - 60px);
+    scrollbar-width: thin;
+    scrollbar-color: #888 #333;
+}
+
+.panorama-controls-body::-webkit-scrollbar {
+    width: 12px !important;
+    display: block !important;
+}
+
+.panorama-controls-body::-webkit-scrollbar-track {
+    background: #333;
+    border-radius: 5px;
+}
+
+.panorama-controls-body::-webkit-scrollbar-thumb {
+    background: #888;
+    border-radius: 5px;
+    min-height: 40px;
+}
+
+.panorama-controls-body::-webkit-scrollbar-thumb:hover {
+    background: #aaa;
 }
 
 .panorama-controls-body.collapsed {
