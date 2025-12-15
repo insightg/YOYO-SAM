@@ -5,10 +5,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SAM3 Object Detection</title>
     <link rel="stylesheet" href="/static/style.css">
-    <!-- Three.js for 3D viewer (using older version with global THREE) -->
+    <!-- Three.js for 3D viewer (detection modal only) -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/PLYLoader.js"></script>
+    <!-- Pannellum for 360 panorama viewer -->
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.css">
+    <script src="https://cdn.jsdelivr.net/npm/pannellum@2.5.6/build/pannellum.js"></script>
 </head>
 <body>
     <div class="container">
@@ -97,11 +100,11 @@
             </div>
 
             <div class="control-group classes-group">
-                <label for="classes">Classes (one per line) <small class="deep-hint">"- deep" = LLM | "- local" = GTSRB</small></label>
-                <textarea id="classes" rows="15">road sign - local
-yield sign
-speed limit sign
-traffic light
+                <label for="classes">Classes (one per line) <small class="deep-hint">"30 ..." = soglia | "- deep" = LLM | "- local" = GTSRB</small></label>
+                <textarea id="classes" rows="15">30 road sign - local
+40 yield sign
+40 speed limit sign
+30 traffic light
 street light pole
 light pole
 manhole cover
@@ -110,7 +113,6 @@ crosswalk
 pedestrian crossing
 no parking sign
 one way sign
-road sign
 parking sign
 fire hydrant
 traffic cone
@@ -160,10 +162,6 @@ sidewalk</textarea>
         <div class="modal-content">
             <div class="modal-header">
                 <h3 id="modal-title">Detection</h3>
-                <div class="modal-actions">
-                    <button id="generate-3d-btn" class="btn-3d" style="display: none;">Genera 3D</button>
-                    <button id="toggle-3d-btn" class="btn-3d" style="display: none;">2D / 3D</button>
-                </div>
                 <button class="modal-close" id="modal-close">&times;</button>
             </div>
             <div class="modal-body">
@@ -194,6 +192,26 @@ sidewalk</textarea>
             <span id="panorama-name" class="panorama-name"></span>
             <span id="panorama-gps" class="panorama-gps"></span>
             <span id="panorama-index" class="panorama-index"></span>
+        </div>
+
+        <!-- Threshold Controls Panel -->
+        <div class="panorama-controls" id="panorama-controls">
+            <div class="panorama-controls-header">
+                <h4>Filtri <span id="pano-detection-count">(0)</span></h4>
+                <button id="pano-controls-toggle" class="controls-toggle">−</button>
+            </div>
+            <div class="panorama-controls-body" id="panorama-controls-body">
+                <div class="pano-slider-group">
+                    <label>Soglia globale</label>
+                    <div class="pano-slider-row">
+                        <input type="range" id="pano-global-threshold" min="0.1" max="0.9" step="0.05" value="0.3">
+                        <span id="pano-global-value">0.30</span>
+                    </div>
+                </div>
+                <div class="pano-class-thresholds" id="pano-class-thresholds">
+                    <!-- Per-class sliders will be added here -->
+                </div>
+            </div>
         </div>
 
         <!-- Mini-map -->

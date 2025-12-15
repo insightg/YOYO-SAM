@@ -252,7 +252,27 @@ def local_analyze_detection(
         return f"{base_clean}.errore", 0.0
 
 
-def is_local_class(class_name: str) -> tuple[bool, str, str]:
+def parse_threshold_prefix(class_name: str) -> tuple[str, float | None]:
+    """
+    Parse optional threshold prefix from class name.
+
+    Format: "30 light poles" -> ("light poles", 0.30)
+            "light poles" -> ("light poles", None)
+
+    Returns:
+        (class_name_without_prefix, threshold_or_none)
+    """
+    import re
+    name = class_name.strip()
+    # Match 2-digit number at start followed by space
+    match = re.match(r'^(\d{2})\s+(.+)$', name)
+    if match:
+        threshold = int(match.group(1)) / 100.0
+        return match.group(2), threshold
+    return name, None
+
+
+def is_local_class(class_name: str) -> tuple[bool, str, str, float | None]:
     """
     Check if a class requires local analysis.
 
@@ -262,26 +282,28 @@ def is_local_class(class_name: str) -> tuple[bool, str, str]:
     - "- local" (legacy, auto-routes based on class name)
 
     Returns:
-        (is_local, base_class_name, module_name)
+        (is_local, base_class_name, module_name, threshold_or_none)
         module_name is "GTSRB", "RDD", or "auto" for legacy local
     """
-    name_lower = class_name.strip().lower()
+    # First extract threshold prefix if present
+    name, threshold = parse_threshold_prefix(class_name)
+    name_lower = name.lower()
 
     # Check for specific module names
     if name_lower.endswith("- gtsrb"):
-        base_class = class_name.rsplit("-", 1)[0].strip()
-        return True, base_class, "GTSRB"
+        base_class = name.rsplit("-", 1)[0].strip()
+        return True, base_class, "GTSRB", threshold
 
     if name_lower.endswith("- rdd"):
-        base_class = class_name.rsplit("-", 1)[0].strip()
-        return True, base_class, "RDD"
+        base_class = name.rsplit("-", 1)[0].strip()
+        return True, base_class, "RDD", threshold
 
     # Legacy support for "- local" (auto-detect based on class name)
     if name_lower.endswith("- local"):
-        base_class = class_name.rsplit("-", 1)[0].strip()
-        return True, base_class, "auto"
+        base_class = name.rsplit("-", 1)[0].strip()
+        return True, base_class, "auto", threshold
 
-    return False, class_name, ""
+    return False, name, "", threshold
 
 
 if __name__ == "__main__":

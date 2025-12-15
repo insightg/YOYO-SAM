@@ -1,165 +1,160 @@
 /**
- * Panoramic 360 Viewer with Detection Overlay
- * Uses Three.js for spherical navigation with detection markers
+ * Panoramic 360 Viewer using Pannellum
+ * With detection hotspots (labels) and threshold sliders
  */
 
 class PanoramaViewer {
     constructor() {
-        // Three.js components
-        this.scene = null;
-        this.camera = null;
-        this.renderer = null;
-        this.controls = null;
-        this.sphere = null;
-        this.material = null;
-
-        // Detection markers
-        this.detectionMarkers = [];
-        this.detectionData = null;
-
-        // State
+        this.viewer = null;
         this.isOpen = false;
         this.currentImage = null;
         this.currentIndex = -1;
         this.trajectory = [];
         this.bounds = null;
+
+        // Detection data
+        this.allDetections = [];  // Unfiltered
+        this.filteredDetections = [];  // After threshold filter
         this.imageInfo = null;
         this.colors = [];
+        this.classThresholds = {};  // Per-class thresholds
+        this.globalThreshold = 0.3;
 
-        // Minimap state
+        // Minimap
         this.minimapZoom = 1;
-
-        // DOM elements (cached)
-        this.viewer = null;
-        this.container = null;
-        this.loadingEl = null;
         this.minimapCanvas = null;
         this.minimapCtx = null;
 
-        // Bind methods
-        this.animate = this.animate.bind(this);
-        this.onResize = this.onResize.bind(this);
+        // DOM
+        this.container = null;
+        this.viewerEl = null;
+        this.loadingEl = null;
+
+        // Bind
         this.onKeyDown = this.onKeyDown.bind(this);
     }
 
     /**
-     * Initialize Three.js scene
+     * Open viewer with image and detections
      */
-    init() {
-        console.log('PanoramaViewer: Initializing...');
+    async open(imageName, options = {}) {
+        console.log('Opening panorama with Pannellum:', imageName);
+
+        this.allDetections = options.allDetections || options.detections || [];
+        this.imageInfo = options.imageInfo || null;
+        this.colors = options.colors || [];
 
         // Get DOM elements
-        this.viewer = document.getElementById('panorama-viewer');
+        this.viewerEl = document.getElementById('panorama-viewer');
         this.container = document.getElementById('panorama-container');
         this.loadingEl = document.getElementById('panorama-loading');
         this.minimapCanvas = document.getElementById('minimap-canvas');
         this.minimapCtx = this.minimapCanvas.getContext('2d');
 
-        const width = window.innerWidth;
-        const height = window.innerHeight;
+        this.isOpen = true;
+        this.viewerEl.style.display = 'block';
+        this.showLoading(true);
 
-        // Scene with dark blue background (so we can see if rendering works)
-        this.scene = new THREE.Scene();
-        this.scene.background = new THREE.Color(0x1a1a2e);
-
-        // Camera - positioned at center, looking outward
-        this.camera = new THREE.PerspectiveCamera(75, width / height, 0.1, 1100);
-        this.camera.position.set(0.001, 0, 0.001); // Tiny offset from center
-
-        // Renderer
-        this.renderer = new THREE.WebGLRenderer({ antialias: true });
-        this.renderer.setSize(width, height);
-        this.renderer.setPixelRatio(window.devicePixelRatio);
-        this.container.appendChild(this.renderer.domElement);
-
-        // OrbitControls - rotate view from center
-        this.controls = new THREE.OrbitControls(this.camera, this.renderer.domElement);
-        this.controls.enableZoom = false;
-        this.controls.enablePan = false;
-        this.controls.rotateSpeed = -0.25;
-        this.controls.enableDamping = true;
-        this.controls.dampingFactor = 0.05;
-        this.controls.target.set(0, 0, 0); // Look at center
-
-        // Sphere geometry - inverted for inside view
-        const geometry = new THREE.SphereGeometry(500, 64, 32);
-        geometry.scale(-1, 1, 1);
-
-        // Material
-        this.material = new THREE.MeshBasicMaterial({
-            color: 0xffffff,
-            side: THREE.DoubleSide
-        });
-
-        this.sphere = new THREE.Mesh(geometry, this.material);
-        this.scene.add(this.sphere);
-
-        // Event listeners
+        // Setup event listeners
         this.setupEventListeners();
 
-        console.log('PanoramaViewer: Init complete');
-    }
-
-    /**
-     * Setup event listeners
-     */
-    setupEventListeners() {
-        document.getElementById('panorama-close').addEventListener('click', () => this.close());
-        document.getElementById('nav-prev').addEventListener('click', () => this.navigatePrev());
-        document.getElementById('nav-next').addEventListener('click', () => this.navigateNext());
-        document.getElementById('minimap-zoom-in').addEventListener('click', () => this.zoomMinimap(1.5));
-        document.getElementById('minimap-zoom-out').addEventListener('click', () => this.zoomMinimap(0.67));
-        this.minimapCanvas.addEventListener('click', (e) => this.onMinimapClick(e));
-
-        window.addEventListener('resize', this.onResize);
-        document.addEventListener('keydown', this.onKeyDown);
-
-        // FOV zoom with mouse wheel
-        this.container.addEventListener('wheel', (e) => {
-            if (!this.isOpen) return;
-            e.preventDefault();
-            this.camera.fov = Math.max(30, Math.min(100, this.camera.fov + e.deltaY * 0.05));
-            this.camera.updateProjectionMatrix();
-        }, { passive: false });
-    }
-
-    /**
-     * Open viewer with image and optional detections
-     */
-    async open(imageName, options = {}) {
-        console.log('=== Opening panorama ===');
-        console.log('Image:', imageName);
-        console.log('Options received:', options);
-        console.log('Detections count:', options.detections?.length || 0);
-        console.log('ImageInfo:', options.imageInfo);
-        console.log('Colors:', options.colors?.length || 0);
-
-        if (!this.scene) {
-            this.init();
-        }
-
-        // Store detection data
-        this.detectionData = options.detections || [];
-        this.imageInfo = options.imageInfo || null;
-        this.colors = options.colors || [];
-
-        this.isOpen = true;
-        this.viewer.style.display = 'block';
-        this.showLoading(true);
+        // Build threshold UI
+        this.buildThresholdUI();
 
         // Load trajectory for minimap
         if (this.trajectory.length === 0) {
             await this.loadTrajectory();
         }
 
-        // Load panorama texture
+        // Load panorama
         await this.loadPanorama(imageName);
+    }
 
-        // Add detection markers
-        this.createDetectionMarkers();
+    /**
+     * Setup event listeners
+     */
+    setupEventListeners() {
+        document.getElementById('panorama-close').onclick = () => this.close();
+        document.getElementById('nav-prev').onclick = () => this.navigatePrev();
+        document.getElementById('nav-next').onclick = () => this.navigateNext();
+        document.getElementById('minimap-zoom-in').onclick = () => this.zoomMinimap(1.5);
+        document.getElementById('minimap-zoom-out').onclick = () => this.zoomMinimap(0.67);
+        this.minimapCanvas.onclick = (e) => this.onMinimapClick(e);
+        document.addEventListener('keydown', this.onKeyDown);
 
-        // Start render loop
-        this.animate();
+        // Controls toggle
+        document.getElementById('pano-controls-toggle').onclick = () => {
+            const body = document.getElementById('panorama-controls-body');
+            const btn = document.getElementById('pano-controls-toggle');
+            body.classList.toggle('collapsed');
+            btn.textContent = body.classList.contains('collapsed') ? '+' : '−';
+        };
+
+        // Global threshold slider
+        const globalSlider = document.getElementById('pano-global-threshold');
+        const globalValue = document.getElementById('pano-global-value');
+        globalSlider.oninput = () => {
+            this.globalThreshold = parseFloat(globalSlider.value);
+            globalValue.textContent = this.globalThreshold.toFixed(2);
+            this.updateHotspots();
+        };
+    }
+
+    /**
+     * Build threshold UI for each class
+     */
+    buildThresholdUI() {
+        const container = document.getElementById('pano-class-thresholds');
+        container.innerHTML = '';
+
+        // Get unique classes
+        const classes = [...new Set(this.allDetections.map(d => d.original_class || d.class))].sort();
+
+        classes.forEach((cls, index) => {
+            const color = this.colors[index % this.colors.length] || '#e94560';
+            const threshold = this.classThresholds[cls] || this.globalThreshold;
+
+            const div = document.createElement('div');
+            div.className = 'pano-class-slider';
+            div.innerHTML = `
+                <label>
+                    <span class="class-color" style="background: ${color}"></span>
+                    <span class="class-name">${cls}</span>
+                </label>
+                <div class="pano-slider-row">
+                    <input type="range" min="0.1" max="0.9" step="0.05" value="${threshold}" data-class="${cls}">
+                    <span>${threshold.toFixed(2)}</span>
+                </div>
+            `;
+
+            const slider = div.querySelector('input');
+            const valueSpan = div.querySelector('.pano-slider-row span');
+
+            slider.oninput = () => {
+                const val = parseFloat(slider.value);
+                this.classThresholds[cls] = val;
+                valueSpan.textContent = val.toFixed(2);
+                this.updateHotspots();
+            };
+
+            container.appendChild(div);
+        });
+    }
+
+    /**
+     * Filter detections based on thresholds
+     */
+    filterDetections() {
+        this.filteredDetections = this.allDetections.filter(det => {
+            const cls = det.original_class || det.class;
+            const threshold = this.classThresholds[cls] !== undefined
+                ? this.classThresholds[cls]
+                : this.globalThreshold;
+            return det.score >= threshold;
+        });
+
+        // Update count
+        document.getElementById('pano-detection-count').textContent = `(${this.filteredDetections.length})`;
     }
 
     /**
@@ -167,12 +162,16 @@ class PanoramaViewer {
      */
     close() {
         this.isOpen = false;
-        this.viewer.style.display = 'none';
-        this.clearDetectionMarkers();
+        this.viewerEl.style.display = 'none';
+        if (this.viewer) {
+            this.viewer.destroy();
+            this.viewer = null;
+        }
+        document.removeEventListener('keydown', this.onKeyDown);
     }
 
     /**
-     * Load GPS trajectory for minimap
+     * Load GPS trajectory
      */
     async loadTrajectory() {
         try {
@@ -188,7 +187,7 @@ class PanoramaViewer {
     }
 
     /**
-     * Load panorama texture
+     * Load panorama with Pannellum
      */
     async loadPanorama(imageName) {
         this.currentImage = imageName;
@@ -204,217 +203,177 @@ class PanoramaViewer {
             console.error('Failed to load panorama info:', e);
         }
 
-        // Load texture
-        const loader = new THREE.TextureLoader();
-        const url = `/api/panorama/${encodeURIComponent(imageName)}?resolution=medium`;
+        // Destroy previous viewer
+        if (this.viewer) {
+            this.viewer.destroy();
+            this.viewer = null;
+        }
 
-        return new Promise((resolve) => {
-            loader.load(url, (texture) => {
-                console.log('Texture loaded:', texture.image.width, 'x', texture.image.height);
-                texture.colorSpace = THREE.SRGBColorSpace;
+        // Clear container
+        this.container.innerHTML = '';
 
-                if (this.material.map) {
-                    this.material.map.dispose();
-                }
-                this.material.map = texture;
-                this.material.needsUpdate = true;
+        // Filter detections
+        this.filterDetections();
 
-                this.showLoading(false);
-                this.drawMinimap();
-                resolve();
-            }, undefined, (error) => {
-                console.error('Texture load error:', error);
-                this.showLoading(false);
-                resolve();
-            });
+        // Build hotspots from filtered detections
+        const hotSpots = this.createHotspots();
+
+        // Create Pannellum viewer
+        const panoramaUrl = `/api/panorama/${encodeURIComponent(imageName)}?resolution=high`;
+
+        this.viewer = pannellum.viewer(this.container, {
+            type: 'equirectangular',
+            panorama: panoramaUrl,
+            autoLoad: true,
+            showControls: true,
+            showFullscreenCtrl: false,
+            showZoomCtrl: true,
+            mouseZoom: true,
+            keyboardZoom: true,
+            draggable: true,
+            disableKeyboardCtrl: false,
+            compass: false,
+            northOffset: 0,
+            hfov: 100,
+            minHfov: 50,
+            maxHfov: 120,
+            hotSpots: hotSpots,
+            hotSpotDebug: false
+        });
+
+        // Listen for load event
+        this.viewer.on('load', () => {
+            console.log('Panorama loaded');
+            this.showLoading(false);
+            this.drawMinimap();
+        });
+
+        this.viewer.on('error', (err) => {
+            console.error('Pannellum error:', err);
+            this.showLoading(false);
         });
     }
 
     /**
-     * Create 3D markers for detections
+     * Update hotspots after threshold change
      */
-    createDetectionMarkers() {
-        this.clearDetectionMarkers();
+    updateHotspots() {
+        if (!this.viewer) return;
 
-        console.log('=== Creating detection markers ===');
-        console.log('detectionData:', this.detectionData?.length || 'null');
-        console.log('imageInfo:', this.imageInfo);
+        // Remove all existing hotspots
+        const currentHotspots = this.viewer.getConfig().hotSpots || [];
+        currentHotspots.forEach(hs => {
+            try {
+                this.viewer.removeHotSpot(hs.id);
+            } catch (e) {}
+        });
 
-        if (!this.detectionData || this.detectionData.length === 0) {
-            console.log('No detections to display');
-            return;
-        }
+        // Filter and recreate
+        this.filterDetections();
+        const newHotspots = this.createHotspots();
 
-        if (!this.imageInfo) {
-            console.log('No imageInfo - cannot calculate positions');
-            return;
-        }
+        newHotspots.forEach(hs => {
+            this.viewer.addHotSpot(hs);
+        });
+    }
+
+    /**
+     * Create hotspots from filtered detections (as labels)
+     */
+    createHotspots() {
+        if (!this.filteredDetections || !this.imageInfo) return [];
 
         const imgWidth = this.imageInfo.width;
         const imgHeight = this.imageInfo.height;
 
-        // Get parent classes for color assignment
-        const parentClasses = [...new Set(this.detectionData.map(d => d.original_class || d.class))].sort();
+        // Get parent classes for colors
+        const parentClasses = [...new Set(this.allDetections.map(d => d.original_class || d.class))].sort();
 
-        console.log('Creating markers for', this.detectionData.length, 'detections');
-        console.log('Image size:', imgWidth, 'x', imgHeight);
-
-        this.detectionData.forEach((det, index) => {
+        const hotSpots = this.filteredDetections.map((det, index) => {
             const [x1, y1, x2, y2] = det.bbox;
             const centerX = (x1 + x2) / 2;
             const centerY = (y1 + y2) / 2;
-            const bboxWidth = x2 - x1;
-            const bboxHeight = y2 - y1;
 
-            // Convert pixel coordinates to spherical angles
-            // Three.js SphereGeometry UV mapping:
-            // - U (horizontal) goes from 0 to 1, mapping to phi from 0 to 2*PI
-            // - V (vertical) goes from 0 to 1, mapping to theta from 0 to PI
-            // After scale(-1,1,1) inversion, U is mirrored
-
-            // Normalized coordinates (0-1)
-            const u = centerX / imgWidth;
-            const v = centerY / imgHeight;
-
-            // Convert to spherical angles matching Three.js SphereGeometry
-            // phi = azimuth angle (around Y axis), 0 to 2*PI
-            // theta = polar angle (from top), 0 to PI
-            // Because geometry is inverted with scale(-1,1,1), phi goes backwards
-            const phi = (1 - u) * 2 * Math.PI;  // Inverted due to scale(-1,1,1)
-            const theta = v * Math.PI;
-
-            // Convert spherical to Cartesian
-            // Three.js uses Y-up coordinate system
-            const radius = 490; // Slightly inside the texture sphere (radius 500)
-            const sinTheta = Math.sin(theta);
-            const cosTheta = Math.cos(theta);
-            const sinPhi = Math.sin(phi);
-            const cosPhi = Math.cos(phi);
-
-            const x = radius * sinTheta * sinPhi;
-            const y = radius * cosTheta;
-            const z = radius * sinTheta * cosPhi;
-
-            const pos = new THREE.Vector3(x, y, z);
-
-            // Calculate marker size based on bbox angular size
-            // Make markers bigger and more visible
-            const angularWidth = (bboxWidth / imgWidth) * 2 * Math.PI;
-            const angularHeight = (bboxHeight / imgHeight) * Math.PI;
-            const markerWidth = Math.max(50, radius * angularWidth);
-            const markerHeight = Math.max(50, radius * angularHeight);
+            // Convert pixel to spherical coordinates
+            // Pannellum uses: yaw (-180 to 180), pitch (-90 to 90)
+            const yaw = ((centerX / imgWidth) - 0.5) * 360;
+            const pitch = (0.5 - (centerY / imgHeight)) * 180;
 
             // Get color
             const colorKey = det.original_class || det.class;
             const colorIndex = parentClasses.indexOf(colorKey);
-            const colorHex = this.colors[colorIndex % this.colors.length] || '#e94560';
+            const color = this.colors[colorIndex % this.colors.length] || '#e94560';
 
-            // Create marker geometry - more visible
-            const geometry = new THREE.PlaneGeometry(markerWidth, markerHeight);
-            const material = new THREE.MeshBasicMaterial({
-                color: colorHex,
-                transparent: true,
-                opacity: 0.4,
-                side: THREE.DoubleSide,
-                depthTest: false,
-                depthWrite: false
-            });
+            // Short class name
+            const shortClass = det.class.includes('.') ?
+                det.class.split('.').pop() : det.class;
 
-            const marker = new THREE.Mesh(geometry, material);
-            marker.position.copy(pos);
-            marker.lookAt(0, 0, 0); // Face camera at center
+            const labelText = `#${det.id || index + 1} ${shortClass} ${(det.score * 100).toFixed(0)}%`;
 
-            // Create border with thicker lines
-            const borderGeometry = new THREE.PlaneGeometry(markerWidth, markerHeight);
-            const edges = new THREE.EdgesGeometry(borderGeometry);
-            const lineMaterial = new THREE.LineBasicMaterial({
-                color: colorHex,
-                linewidth: 3,
-                depthTest: false
-            });
-            const border = new THREE.LineSegments(edges, lineMaterial);
-            border.position.copy(pos);
-            border.lookAt(0, 0, 0);
-
-            // Create label sprite positioned above the marker
-            const label = this.createLabelSprite(det, colorHex, index);
-            const labelOffset = new THREE.Vector3().copy(pos).normalize().multiplyScalar(radius - 20);
-            labelOffset.y += markerHeight / 2 + 15;
-            label.position.copy(pos);
-            // Move label slightly toward center and up
-            const upDir = new THREE.Vector3(0, 1, 0);
-            label.position.addScaledVector(upDir, markerHeight / 2 + 20);
-
-            marker.userData = { detection: det, index: index };
-
-            this.scene.add(marker);
-            this.scene.add(border);
-            this.scene.add(label);
-
-            this.detectionMarkers.push(marker, border, label);
-
-            if (index < 3) {
-                console.log(`Detection ${index}: pixel(${centerX.toFixed(0)}, ${centerY.toFixed(0)}) -> pos(${x.toFixed(1)}, ${y.toFixed(1)}, ${z.toFixed(1)})`);
-            }
+            return {
+                id: `det-${det.id || index}`,
+                pitch: pitch,
+                yaw: yaw,
+                type: 'info',
+                text: labelText,
+                cssClass: 'detection-label-hotspot',
+                createTooltipFunc: (hotSpotDiv) => {
+                    this.createLabelHotspot(hotSpotDiv, det, color, labelText);
+                },
+                createTooltipArgs: { detection: det, color: color }
+            };
         });
 
-        console.log('Created', this.detectionMarkers.length / 3, 'detection markers');
+        console.log('Created', hotSpots.length, 'label hotspots');
+        return hotSpots;
     }
 
     /**
-     * Create a text label sprite
+     * Create label-style hotspot
      */
-    createLabelSprite(detection, color, index) {
-        const canvas = document.createElement('canvas');
-        const ctx = canvas.getContext('2d');
-        canvas.width = 512;
-        canvas.height = 64;
+    createLabelHotspot(hotSpotDiv, detection, color, labelText) {
+        // Make the hotspot a label
+        hotSpotDiv.style.cssText = `
+            background: ${color};
+            color: white;
+            padding: 6px 10px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-weight: 500;
+            white-space: nowrap;
+            cursor: pointer;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+            border: 2px solid rgba(255,255,255,0.3);
+            transition: border-color 0.2s, box-shadow 0.2s;
+            pointer-events: auto;
+        `;
+        hotSpotDiv.textContent = labelText;
 
-        // Background
-        ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        // Hover effect (only border/shadow, no transform)
+        hotSpotDiv.onmouseenter = () => {
+            hotSpotDiv.style.borderColor = 'white';
+            hotSpotDiv.style.boxShadow = '0 4px 16px rgba(0,0,0,0.6)';
+        };
+        hotSpotDiv.onmouseleave = () => {
+            hotSpotDiv.style.borderColor = 'rgba(255,255,255,0.3)';
+            hotSpotDiv.style.boxShadow = '0 2px 8px rgba(0,0,0,0.4)';
+        };
 
-        // Border
-        ctx.strokeStyle = color;
-        ctx.lineWidth = 4;
-        ctx.strokeRect(2, 2, canvas.width - 4, canvas.height - 4);
-
-        // Text
-        ctx.fillStyle = '#ffffff';
-        ctx.font = 'bold 28px Arial';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-
-        const shortClass = detection.class.includes('.') ?
-            detection.class.split('.').pop() : detection.class;
-        const text = `#${detection.id || index + 1} ${shortClass} (${(detection.score * 100).toFixed(0)}%)`;
-        ctx.fillText(text, canvas.width / 2, canvas.height / 2);
-
-        const texture = new THREE.CanvasTexture(canvas);
-        const material = new THREE.SpriteMaterial({
-            map: texture,
-            transparent: true,
-            depthTest: false
-        });
-        const sprite = new THREE.Sprite(material);
-        sprite.scale.set(100, 12.5, 1);
-
-        return sprite;
-    }
-
-    /**
-     * Clear all detection markers
-     */
-    clearDetectionMarkers() {
-        this.detectionMarkers.forEach(marker => {
-            this.scene.remove(marker);
-            if (marker.geometry) marker.geometry.dispose();
-            if (marker.material) {
-                if (marker.material.map) marker.material.map.dispose();
-                marker.material.dispose();
+        // Click to show detection modal
+        hotSpotDiv.onclick = (e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            if (window.openDetectionModalFor && this.imageInfo) {
+                window.openDetectionModalFor(
+                    detection,
+                    this.currentImage,
+                    this.imageInfo.width,
+                    this.imageInfo.height,
+                    this.colors,
+                    this.allDetections
+                );
             }
-        });
-        this.detectionMarkers = [];
+        };
     }
 
     /**
@@ -439,7 +398,7 @@ class PanoramaViewer {
     }
 
     /**
-     * Update navigation button states
+     * Update navigation buttons
      */
     updateNavigationButtons() {
         document.getElementById('nav-prev').disabled = this.currentIndex <= 0;
@@ -447,26 +406,20 @@ class PanoramaViewer {
     }
 
     /**
-     * Navigate to previous panorama
+     * Navigate to previous
      */
     navigatePrev() {
         if (this.currentIndex > 0) {
-            const prevImage = this.trajectory[this.currentIndex - 1].name;
-            this.loadPanorama(prevImage).then(() => {
-                this.createDetectionMarkers();
-            });
+            this.loadPanorama(this.trajectory[this.currentIndex - 1].name);
         }
     }
 
     /**
-     * Navigate to next panorama
+     * Navigate to next
      */
     navigateNext() {
         if (this.currentIndex < this.trajectory.length - 1) {
-            const nextImage = this.trajectory[this.currentIndex + 1].name;
-            this.loadPanorama(nextImage).then(() => {
-                this.createDetectionMarkers();
-            });
+            this.loadPanorama(this.trajectory[this.currentIndex + 1].name);
         }
     }
 
@@ -503,7 +456,7 @@ class PanoramaViewer {
             y: height - padding - (lat - this.bounds.minLat) * scale
         });
 
-        // Draw trajectory
+        // Draw trajectory line
         ctx.beginPath();
         ctx.strokeStyle = 'rgba(233, 69, 96, 0.6)';
         ctx.lineWidth = 2;
@@ -527,6 +480,17 @@ class PanoramaViewer {
                 ctx.strokeStyle = 'white';
                 ctx.lineWidth = 2;
                 ctx.stroke();
+
+                if (point.heading !== undefined) {
+                    const rad = (point.heading - 90) * Math.PI / 180;
+                    const arrowLen = 15;
+                    ctx.beginPath();
+                    ctx.moveTo(pos.x, pos.y);
+                    ctx.lineTo(pos.x + Math.cos(rad) * arrowLen, pos.y + Math.sin(rad) * arrowLen);
+                    ctx.strokeStyle = 'white';
+                    ctx.lineWidth = 2;
+                    ctx.stroke();
+                }
             } else {
                 ctx.arc(pos.x, pos.y, 3, 0, Math.PI * 2);
                 ctx.fillStyle = 'rgba(255, 255, 255, 0.4)';
@@ -596,28 +560,6 @@ class PanoramaViewer {
             case '+': case '=': this.zoomMinimap(1.5); break;
             case '-': this.zoomMinimap(0.67); break;
         }
-    }
-
-    /**
-     * Window resize handler
-     */
-    onResize() {
-        if (!this.isOpen || !this.camera || !this.renderer) return;
-        const width = window.innerWidth;
-        const height = window.innerHeight;
-        this.camera.aspect = width / height;
-        this.camera.updateProjectionMatrix();
-        this.renderer.setSize(width, height);
-    }
-
-    /**
-     * Animation loop
-     */
-    animate() {
-        if (!this.isOpen) return;
-        requestAnimationFrame(this.animate);
-        this.controls.update();
-        this.renderer.render(this.scene, this.camera);
     }
 }
 

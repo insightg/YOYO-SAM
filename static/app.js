@@ -1400,6 +1400,105 @@ function openDetectionModal(index) {
     tempImg.src = `/api/image/${encodeURIComponent(currentImage)}?max_size=4000`;
 }
 
+/**
+ * Open detection modal for any detection (can be called from panorama viewer)
+ * @param {Object} det - Detection object with bbox, class, score, etc.
+ * @param {string} imageName - Image filename
+ * @param {number} imageWidth - Original image width
+ * @param {number} imageHeight - Original image height
+ * @param {Array} colors - Color palette array
+ * @param {Array} allDets - All detections for color consistency
+ */
+window.openDetectionModalFor = function(det, imageName, imageWidth, imageHeight, colors, allDets) {
+    if (!det) return;
+
+    const [x1, y1, x2, y2] = det.bbox;
+    const cropWidth = x2 - x1;
+    const cropHeight = y2 - y1;
+
+    // Add some padding around the detection (10%)
+    const padding = Math.max(cropWidth, cropHeight) * 0.1;
+    const padX1 = Math.max(0, x1 - padding);
+    const padY1 = Math.max(0, y1 - padding);
+    const padX2 = Math.min(imageWidth, x2 + padding);
+    const padY2 = Math.min(imageHeight, y2 + padding);
+
+    const finalWidth = padX2 - padX1;
+    const finalHeight = padY2 - padY1;
+
+    // Create a temporary image to load the full-res image
+    const tempImg = new Image();
+    tempImg.crossOrigin = 'anonymous';
+    tempImg.onload = () => {
+        // Calculate scale for the loaded image (might be resized)
+        const scaleX = tempImg.naturalWidth / imageWidth;
+        const scaleY = tempImg.naturalHeight / imageHeight;
+
+        // Set canvas size (limit max size for display)
+        const maxDisplaySize = 800;
+        let displayWidth = finalWidth;
+        let displayHeight = finalHeight;
+
+        if (displayWidth > maxDisplaySize || displayHeight > maxDisplaySize) {
+            const ratio = Math.min(maxDisplaySize / displayWidth, maxDisplaySize / displayHeight);
+            displayWidth *= ratio;
+            displayHeight *= ratio;
+        }
+
+        modalCanvas.width = displayWidth;
+        modalCanvas.height = displayHeight;
+
+        const ctx = modalCanvas.getContext('2d');
+
+        // Draw cropped region
+        ctx.drawImage(
+            tempImg,
+            padX1 * scaleX, padY1 * scaleY,
+            finalWidth * scaleX, finalHeight * scaleY,
+            0, 0,
+            displayWidth, displayHeight
+        );
+
+        // Draw bounding box on the crop
+        const boxScaleX = displayWidth / finalWidth;
+        const boxScaleY = displayHeight / finalHeight;
+        const relX1 = (x1 - padX1) * boxScaleX;
+        const relY1 = (y1 - padY1) * boxScaleY;
+        const relX2 = (x2 - padX1) * boxScaleX;
+        const relY2 = (y2 - padY1) * boxScaleY;
+
+        // Get color for this class
+        const parentClasses = [...new Set((allDets || [det]).map(d => d.original_class || d.class))].sort();
+        const colorKey = det.original_class || det.class;
+        const classIndex = parentClasses.indexOf(colorKey);
+        const color = (colors || COLORS)[classIndex >= 0 ? classIndex % (colors || COLORS).length : 0];
+
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 3;
+        ctx.strokeRect(relX1, relY1, relX2 - relX1, relY2 - relY1);
+
+        // Update modal info
+        const detId = det.id || 0;
+        modalTitle.textContent = `#${detId} - ${det.class} (${(det.score * 100).toFixed(1)}%)`;
+
+        // Build info text with GPS if available
+        let infoText = `Size: ${Math.round(cropWidth)} x ${Math.round(cropHeight)} px`;
+
+        if (det.latitude && det.longitude) {
+            infoText += ` | Distance: ~${det.distance_m}m | Bearing: ${det.bearing_deg}°`;
+            infoText += `<br><span class="modal-gps">GPS: <a href="https://www.google.com/maps?q=${det.latitude},${det.longitude}" target="_blank">${det.latitude.toFixed(6)}, ${det.longitude.toFixed(6)}</a></span>`;
+        }
+
+        modalInfo.innerHTML = infoText;
+
+        // Show modal
+        detectionModal.style.display = 'flex';
+    };
+
+    // Load the image
+    tempImg.src = `/api/image/${encodeURIComponent(imageName)}?max_size=4000`;
+};
+
 let modalCloseBlocked = false;
 
 function closeModal(event) {
@@ -1582,7 +1681,7 @@ async function generate3DModel(force = false) {
             setTimeout(() => {
                 modalCloseBlocked = false;
                 console.log('Modal close unblocked');
-            }, 500);
+            }, 2000);
             return;
         } catch (error) {
             console.error('Error loading cached 3D:', error);
@@ -1879,24 +1978,27 @@ async function init3DViewer(plyUrl) {
         const pointSize = 0.05;  // Fixed large size for debug
         console.log('Point size:', pointSize);
 
-        // Create point cloud with vertex colors
+        // Create point cloud - try with fixed white color first for debug
         const material = new THREE.PointsMaterial({
             size: pointSize,
-            vertexColors: true,
+            color: 0xffffff,  // Fixed white for debug
+            vertexColors: false,  // Disable vertex colors for debug
             sizeAttenuation: true
         });
+        console.log('Material created with fixed white color');
 
         const points = new THREE.Points(geometry, material);
         scene.add(points);
         console.log('Points added to scene:', vertexCount);
 
-        // Debug: add a red cube to verify rendering works
+        // Debug: add a wireframe cube (lines) to verify rendering works
         const debugCube = new THREE.Mesh(
-            new THREE.BoxGeometry(0.1, 0.1, 0.1),
-            new THREE.MeshBasicMaterial({ color: 0xff0000 })
+            new THREE.BoxGeometry(0.5, 0.5, 0.5),
+            new THREE.MeshBasicMaterial({ color: 0xff0000, wireframe: true })
         );
+        debugCube.position.set(0, 0, 0);
         scene.add(debugCube);
-        console.log('Debug cube added at origin');
+        console.log('Debug wireframe cube added at origin (size 0.5)');
 
         // Debug: verify renderer is working
         console.log('Renderer canvas size:', renderer.domElement.width, 'x', renderer.domElement.height);

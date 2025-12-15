@@ -422,8 +422,8 @@ def detect_objects(image_path: Path, classes: list[str], confidence: float, tile
                             ]
                         })
 
-    # Sort by score descending
-    all_detections.sort(key=lambda x: x["score"], reverse=True)
+    # Sort by class name, then by score descending
+    all_detections.sort(key=lambda x: (x["class"], -x["score"]))
 
     return all_detections
 
@@ -561,23 +561,31 @@ async def detect(request: DetectRequest):
         # Separate deep/local analysis classes from regular classes
         deep_classes = {}   # base_class -> True (LLM analysis)
         local_classes = {}  # base_class -> module_name (GTSRB, RDD, or auto)
+        class_thresholds = {}  # base_class -> min_threshold (from "30 classname" format)
         detection_classes = []
 
         for cls in request.classes:
             # Check for local analysis first (takes precedence)
-            is_local, base_class, module = is_local_class(cls)
+            is_local, base_class, module, threshold = is_local_class(cls)
             if is_local:
                 local_classes[base_class] = module
                 detection_classes.append(base_class)
+                if threshold is not None:
+                    class_thresholds[base_class] = threshold
                 continue
 
             # Check for deep (LLM) analysis
-            is_deep, base_class = is_deep_class(cls)
+            is_deep, base_class, threshold = is_deep_class(cls)
             if is_deep:
                 deep_classes[base_class] = True
                 detection_classes.append(base_class)
+                if threshold is not None:
+                    class_thresholds[base_class] = threshold
             else:
-                detection_classes.append(cls)
+                # Regular class (base_class is the full name without threshold)
+                detection_classes.append(base_class)
+                if threshold is not None:
+                    class_thresholds[base_class] = threshold
 
         # Run detection with base classes
         detections = detect_objects(
@@ -587,10 +595,14 @@ async def detect(request: DetectRequest):
             request.tiles
         )
 
-        # Perform local analysis for marked classes (GTSRB/RDD model)
+        # Perform local analysis for marked classes (GTSRB/RDD model) - apply class threshold
         if local_classes:
             for det in detections:
                 if det["class"] in local_classes:
+                    # Use class-specific threshold if set, otherwise no minimum
+                    min_threshold = class_thresholds.get(det["class"])
+                    if min_threshold is not None and det.get("score", 0) < min_threshold:
+                        continue  # Skip detections below threshold
                     det["original_class"] = det["class"]
                     module = local_classes[det["class"]]  # Get explicit module
                     detailed_class, local_confidence = local_analyze_detection(
@@ -604,18 +616,21 @@ async def detect(request: DetectRequest):
                     det["local_confidence"] = round(local_confidence, 4)
                     det["local_module"] = module if module != "auto" else ("RDD" if is_crack_class(det["original_class"]) else "GTSRB")
 
-        # Perform deep analysis for marked classes (LLM)
+        # Perform deep analysis for marked classes (LLM) - apply class threshold or default 0.5
         if deep_classes:
             for det in detections:
                 if det["class"] in deep_classes:
-                    det["original_class"] = det["class"]
-                    detailed_class = deep_analyze_detection(
-                        image_path,
-                        det,
-                        det["class"]
-                    )
-                    det["class"] = detailed_class
-                    det["deep_analyzed"] = True
+                    # Use class-specific threshold if set, otherwise default to 0.5
+                    min_threshold = class_thresholds.get(det["class"], 0.5)
+                    if det.get("score", 0) >= min_threshold:
+                        det["original_class"] = det["class"]
+                        detailed_class = deep_analyze_detection(
+                            image_path,
+                            det,
+                            det["class"]
+                        )
+                        det["class"] = detailed_class
+                        det["deep_analyzed"] = True
 
         # Get image dimensions for frontend
         img = Image.open(image_path)
@@ -642,6 +657,23 @@ async def detect(request: DetectRequest):
             }
         else:
             camera_info = None
+
+        # Filter detections by per-class thresholds
+        if class_thresholds:
+            filtered_detections = []
+            for det in detections:
+                # Get the base class for threshold lookup
+                base_cls = det.get("original_class", det["class"])
+                # For nested classes like "road_sign.limite_30", use the base part
+                if "." in base_cls:
+                    base_cls = base_cls.split(".")[0].replace("_", " ")
+                min_threshold = class_thresholds.get(base_cls)
+                if min_threshold is None:
+                    # No threshold specified, keep detection
+                    filtered_detections.append(det)
+                elif det.get("score", 0) >= min_threshold:
+                    filtered_detections.append(det)
+            detections = filtered_detections
 
         return {
             "status": "success",
@@ -681,21 +713,29 @@ async def detect_with_progress(image_name: str, classes: list[str], confidence: 
         # Parse classes
         deep_classes = {}
         local_classes = {}  # { base_class: module_name }
+        class_thresholds = {}  # base_class -> min_threshold (from "30 classname" format)
         detection_classes = []
 
         for cls in classes:
-            is_local, base_class, module = is_local_class(cls)
+            is_local, base_class, module, threshold = is_local_class(cls)
             if is_local:
                 local_classes[base_class] = module  # Store module name (GTSRB, RDD, or auto)
                 detection_classes.append(base_class)
+                if threshold is not None:
+                    class_thresholds[base_class] = threshold
                 continue
 
-            is_deep, base_class = is_deep_class(cls)
+            is_deep, base_class, threshold = is_deep_class(cls)
             if is_deep:
                 deep_classes[base_class] = True
                 detection_classes.append(base_class)
+                if threshold is not None:
+                    class_thresholds[base_class] = threshold
             else:
-                detection_classes.append(cls)
+                # Regular class (base_class is the full name without threshold)
+                detection_classes.append(base_class)
+                if threshold is not None:
+                    class_thresholds[base_class] = threshold
 
         # Step 2: Load model if needed
         yield {"type": "progress", "stage": "model", "message": "Caricamento modello SAM3...", "percent": 5}
@@ -864,9 +904,15 @@ async def detect_with_progress(image_name: str, classes: list[str], confidence: 
         }
         await asyncio.sleep(0.05)
 
-        # Step 6: Local analysis (GTSRB/RDD) - BATCH PROCESSING
+        # Step 6: Local analysis (GTSRB/RDD) - BATCH PROCESSING - apply class threshold
         if local_classes:
-            local_items = [d for d in all_detections if d["class"] in local_classes]
+            local_items = []
+            for d in all_detections:
+                if d["class"] in local_classes:
+                    # Use class-specific threshold if set, otherwise no minimum
+                    min_threshold = class_thresholds.get(d["class"])
+                    if min_threshold is None or d.get("score", 0) >= min_threshold:
+                        local_items.append(d)
             total_local = len(local_items)
             if total_local > 0:
                 yield {
@@ -915,9 +961,16 @@ async def detect_with_progress(image_name: str, classes: list[str], confidence: 
 
                     processed += len(dets)
 
-        # Step 7: Deep analysis (LLM)
+        # Step 7: Deep analysis (LLM) - apply class threshold or default 0.5
         if deep_classes:
-            deep_items = [d for d in all_detections if d.get("original_class", d["class"]) in deep_classes and not d.get("local_analyzed")]
+            deep_items = []
+            for d in all_detections:
+                base_cls = d.get("original_class", d["class"])
+                if base_cls in deep_classes and not d.get("local_analyzed"):
+                    # Use class-specific threshold if set, otherwise default to 0.5
+                    min_threshold = class_thresholds.get(base_cls, 0.5)
+                    if d.get("score", 0) >= min_threshold:
+                        deep_items.append(d)
             total_deep = len(deep_items)
             if total_deep > 0:
                 yield {
@@ -967,8 +1020,25 @@ async def detect_with_progress(image_name: str, classes: list[str], confidence: 
                 "altitude": pose.altitude
             }
 
-        # Sort by score
-        all_detections.sort(key=lambda x: x["score"], reverse=True)
+        # Filter detections by per-class thresholds
+        if class_thresholds:
+            filtered_detections = []
+            for det in all_detections:
+                # Get the base class for threshold lookup
+                base_cls = det.get("original_class", det["class"])
+                # For nested classes like "road_sign.limite_30", use the base part
+                if "." in base_cls:
+                    base_cls = base_cls.split(".")[0].replace("_", " ")
+                min_threshold = class_thresholds.get(base_cls)
+                if min_threshold is None:
+                    # No threshold specified, keep detection
+                    filtered_detections.append(det)
+                elif det.get("score", 0) >= min_threshold:
+                    filtered_detections.append(det)
+            all_detections = filtered_detections
+
+        # Sort by class name, then by score descending
+        all_detections.sort(key=lambda x: (x["class"], -x["score"]))
 
         # Assign sequential IDs (after sorting)
         for idx, det in enumerate(all_detections, start=1):

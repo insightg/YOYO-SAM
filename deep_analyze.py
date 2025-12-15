@@ -203,27 +203,55 @@ def deep_analyze_detection(
         # Analyze with LLM, passing the category context
         subclass = analyze_with_llm(cropped, base_class)
 
-        # Format: base_class.subclass
+        # Format result
         base_clean = base_class.replace(" ", "_").lower()
+
+        # If not identifiable, return base_class.generic
+        if subclass in ("non_identificabile", "errore_api", "errore_analisi", "timeout"):
+            return f"{base_clean}.generic"
+
         return f"{base_clean}.{subclass}"
 
     except Exception as e:
         print(f"Error in deep analysis: {e}")
         base_clean = base_class.replace(" ", "_").lower()
-        return f"{base_clean}.errore"
+        return f"{base_clean}.generic"
 
 
-def is_deep_class(class_name: str) -> tuple[bool, str]:
+def parse_threshold_prefix(class_name: str) -> tuple[str, float | None]:
+    """
+    Parse optional threshold prefix from class name.
+
+    Format: "30 light poles" -> ("light poles", 0.30)
+            "light poles" -> ("light poles", None)
+
+    Returns:
+        (class_name_without_prefix, threshold_or_none)
+    """
+    import re
+    name = class_name.strip()
+    # Match 2-digit number at start followed by space
+    match = re.match(r'^(\d{2})\s+(.+)$', name)
+    if match:
+        threshold = int(match.group(1)) / 100.0
+        return match.group(2), threshold
+    return name, None
+
+
+def is_deep_class(class_name: str) -> tuple[bool, str, float | None]:
     """
     Check if a class requires deep analysis.
 
     Returns:
-        (is_deep, base_class_name)
+        (is_deep, base_class_name, threshold_or_none)
     """
-    if class_name.strip().lower().endswith("- deep"):
-        base_class = class_name.rsplit("-", 1)[0].strip()
-        return True, base_class
-    return False, class_name
+    # First extract threshold prefix if present
+    name, threshold = parse_threshold_prefix(class_name)
+
+    if name.lower().endswith("- deep"):
+        base_class = name.rsplit("-", 1)[0].strip()
+        return True, base_class, threshold
+    return False, name, threshold
 
 
 if __name__ == "__main__":
@@ -231,19 +259,22 @@ if __name__ == "__main__":
     print(f"API Key configured: {bool(OPENROUTER_API_KEY)}")
     print(f"Model: {MODEL}")
 
-    # Test class detection
+    # Test class detection with thresholds
     test_classes = [
         "road sign - deep",
         "road crack - deep",
         "traffic light",
         "manhole - deep",
-        "stop sign"
+        "stop sign",
+        "30 light pole",
+        "40 road sign - deep",
+        "50 traffic sign"
     ]
 
-    print("\nTest classi:")
+    print("\nTest classi (con soglie):")
     for cls in test_classes:
-        is_deep, base = is_deep_class(cls)
-        print(f"  {cls} -> deep={is_deep}, base='{base}'")
+        is_deep, base, threshold = is_deep_class(cls)
+        print(f"  {cls} -> deep={is_deep}, base='{base}', threshold={threshold}")
 
     # Show example prompt
     print("\n--- Esempio prompt per 'road crack' ---")
