@@ -5,6 +5,7 @@ Local alternative to deep_analyze using Qwen3-VL-30B-A3B-Instruct
 """
 
 import re
+import gc
 import torch
 from PIL import Image
 from pathlib import Path
@@ -13,6 +14,7 @@ from typing import Optional
 # Global model cache
 _model = None
 _processor = None
+_qwen_loaded = False
 
 # Category-specific guidance (same as deep_analyze.py)
 CATEGORY_HINTS = {
@@ -36,11 +38,58 @@ CATEGORY_HINTS = {
 }
 
 
-def get_model():
-    """Load or return cached Qwen3-VL model."""
-    global _model, _processor
+def _unload_sam_for_qwen():
+    """Unload SAM model from GPU to make room for Qwen."""
+    try:
+        # Import here to avoid circular imports
+        import app
+        if hasattr(app, 'unload_sam_from_gpu'):
+            app.unload_sam_from_gpu()
+    except Exception as e:
+        print(f"Note: Could not unload SAM: {e}")
+
+
+def _reload_sam_after_qwen():
+    """Reload SAM model to GPU after Qwen is done."""
+    try:
+        import app
+        if hasattr(app, 'reload_sam_to_gpu'):
+            app.reload_sam_to_gpu()
+    except Exception as e:
+        print(f"Note: Could not reload SAM: {e}")
+
+
+def unload_qwen():
+    """Unload Qwen model from GPU to free memory."""
+    global _model, _processor, _qwen_loaded
 
     if _model is None:
+        return
+
+    print("Unloading Qwen from GPU...")
+    try:
+        del _model
+        del _processor
+        _model = None
+        _processor = None
+        _qwen_loaded = False
+
+        gc.collect()
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        print("Qwen unloaded, GPU memory freed")
+    except Exception as e:
+        print(f"Error unloading Qwen: {e}")
+
+
+def get_model():
+    """Load or return cached Qwen3-VL model."""
+    global _model, _processor, _qwen_loaded
+
+    if _model is None:
+        # First, unload SAM from GPU to make room
+        _unload_sam_for_qwen()
+
         from transformers import AutoModelForImageTextToText, AutoProcessor
 
         model_name = "Qwen/Qwen3-VL-30B-A3B-Instruct"
@@ -53,9 +102,15 @@ def get_model():
             device_map="auto",
             trust_remote_code=True
         )
+        _qwen_loaded = True
         print("Qwen3-VL loaded successfully")
 
     return _model, _processor
+
+
+def is_qwen_loaded() -> bool:
+    """Check if Qwen model is currently loaded."""
+    return _qwen_loaded
 
 
 def build_contextual_prompt(category: str) -> str:
@@ -154,8 +209,12 @@ def analyze_with_qwen(image: Image.Image, category: str) -> str:
             padding=True
         ).to(model.device)
 
-        # Generate response
-        with torch.no_grad():
+        # Generate response - disable autocast to avoid dtype conflicts with SAM context
+        with torch.no_grad(), torch.cuda.amp.autocast(enabled=False):
+            # Ensure inputs are in the correct dtype
+            if hasattr(inputs, 'pixel_values') and inputs.pixel_values is not None:
+                inputs['pixel_values'] = inputs.pixel_values.to(torch.bfloat16)
+
             outputs = model.generate(
                 **inputs,
                 max_new_tokens=50,

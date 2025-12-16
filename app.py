@@ -30,7 +30,7 @@ _preprocess_executor = ThreadPoolExecutor(max_workers=4)
 # Add local modules to path
 from geolocate import get_poses, geolocate_detections
 from deep_analyze import is_deep_class, deep_analyze_detection
-from qwen_analyze import qwen_analyze_detection
+from qwen_analyze import qwen_analyze_detection, unload_qwen
 from local_analyze import is_local_class, local_analyze_detection, batch_analyze_detections
 from crack_analyze import is_crack_class
 from reconstruct_3d import (
@@ -77,6 +77,46 @@ DEFAULT_CLASSES = """30,Cartello_stradale,road sign,gtsrb
 _processor: Optional[Sam3Processor] = None
 _model_loading = False
 _text_embeddings_cache: dict = {}  # Cache for text embeddings
+_sam_on_gpu = True  # Track if SAM is on GPU
+
+
+def unload_sam_from_gpu():
+    """Move SAM model to CPU to free GPU memory for other models."""
+    global _processor, _sam_on_gpu
+
+    if _processor is None or not _sam_on_gpu:
+        return
+
+    print("Unloading SAM from GPU...")
+    try:
+        _processor.model.to("cpu")
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        _sam_on_gpu = False
+        print("SAM moved to CPU, GPU memory freed")
+    except Exception as e:
+        print(f"Error unloading SAM: {e}")
+
+
+def reload_sam_to_gpu():
+    """Move SAM model back to GPU."""
+    global _processor, _sam_on_gpu
+
+    if _processor is None or _sam_on_gpu:
+        return
+
+    print("Reloading SAM to GPU...")
+    try:
+        _processor.model.to("cuda")
+        _sam_on_gpu = True
+        print("SAM reloaded to GPU")
+    except Exception as e:
+        print(f"Error reloading SAM: {e}")
+
+
+def is_sam_on_gpu() -> bool:
+    """Check if SAM is currently on GPU."""
+    return _sam_on_gpu and _processor is not None
 
 
 def parse_csv_class(csv_line: str) -> dict:
@@ -748,6 +788,10 @@ async def detect(request: DetectRequest):
                         det["class"] = detailed_class
                         det["qwen_analyzed"] = True
 
+            # Cleanup: unload Qwen and reload SAM
+            unload_qwen()
+            reload_sam_to_gpu()
+
         # Get image dimensions for frontend
         img = Image.open(image_path)
 
@@ -1176,6 +1220,10 @@ async def detect_with_progress(image_name: str, classes: list[str], confidence: 
                     detailed_class = qwen_analyze_detection(image_path, det, label)
                     det["class"] = detailed_class
                     det["qwen_analyzed"] = True
+
+            # Cleanup: unload Qwen and reload SAM
+            unload_qwen()
+            reload_sam_to_gpu()
 
         # Step 8: Geolocation
         yield {"type": "progress", "stage": "geolocation", "message": "Calcolo coordinate GPS...", "percent": 95}
