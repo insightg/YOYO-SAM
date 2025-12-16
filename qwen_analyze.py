@@ -41,13 +41,13 @@ def get_model():
     global _model, _processor
 
     if _model is None:
-        from transformers import Qwen2VLForConditionalGeneration, AutoProcessor
+        from transformers import AutoModelForImageTextToText, AutoProcessor
 
         model_name = "Qwen/Qwen3-VL-30B-A3B-Instruct"
         print(f"Loading {model_name}...")
 
         _processor = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
-        _model = Qwen2VLForConditionalGeneration.from_pretrained(
+        _model = AutoModelForImageTextToText.from_pretrained(
             model_name,
             torch_dtype=torch.bfloat16,
             device_map="auto",
