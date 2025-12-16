@@ -30,6 +30,7 @@ _preprocess_executor = ThreadPoolExecutor(max_workers=4)
 # Add local modules to path
 from geolocate import get_poses, geolocate_detections
 from deep_analyze import is_deep_class, deep_analyze_detection
+from qwen_analyze import qwen_analyze_detection
 from local_analyze import is_local_class, local_analyze_detection, batch_analyze_detections
 from crack_analyze import is_crack_class
 from reconstruct_3d import (
@@ -634,6 +635,7 @@ async def detect(request: DetectRequest):
         # Parse classes (support CSV and legacy formats)
         local_classes = {}   # label -> module (OCR, GTSRB, RDD)
         deep_classes = {}    # label -> True
+        qwen_classes = {}    # label -> True (local Qwen VL analysis)
         class_thresholds = {}  # label -> min_threshold
         detection_classes = []  # descriptions for SAM3
         label_to_description = {}  # label -> description mapping
@@ -661,6 +663,9 @@ async def detect(request: DetectRequest):
 
             if "deep" in modules:
                 deep_classes[label] = True
+
+            if "qwen" in modules:
+                qwen_classes[label] = True
 
             # Use DESCRIPTION for SAM3 detection, not label
             detection_classes.append(description)
@@ -725,6 +730,23 @@ async def detect(request: DetectRequest):
                         )
                         det["class"] = detailed_class
                         det["deep_analyzed"] = True
+
+        # Perform Qwen analysis for marked classes (local VLM) - apply class threshold or default 0.5
+        if qwen_classes:
+            for det in detections:
+                label = det.get("original_class", det["class"])
+                if label in qwen_classes:
+                    min_threshold = class_thresholds.get(label, 0.5)
+                    if det.get("score", 0) >= min_threshold:
+                        if "original_class" not in det:
+                            det["original_class"] = det["class"]
+                        detailed_class = qwen_analyze_detection(
+                            image_path,
+                            det,
+                            label
+                        )
+                        det["class"] = detailed_class
+                        det["qwen_analyzed"] = True
 
         # Get image dimensions for frontend
         img = Image.open(image_path)
@@ -807,6 +829,7 @@ async def detect_with_progress(image_name: str, classes: list[str], confidence: 
         # Parse classes (support CSV and legacy formats)
         local_classes = {}   # label -> module (OCR, GTSRB, RDD)
         deep_classes = {}    # label -> True
+        qwen_classes = {}    # label -> True (local Qwen VL analysis)
         class_thresholds = {}  # label -> min_threshold
         detection_classes = []  # descriptions for SAM3
         label_to_description = {}  # label -> description mapping
@@ -834,6 +857,9 @@ async def detect_with_progress(image_name: str, classes: list[str], confidence: 
 
             if "deep" in modules:
                 deep_classes[label] = True
+
+            if "qwen" in modules:
+                qwen_classes[label] = True
 
             # Use DESCRIPTION for SAM3 detection, not label
             detection_classes.append(description)
@@ -1112,6 +1138,44 @@ async def detect_with_progress(image_name: str, classes: list[str], confidence: 
                     detailed_class = deep_analyze_detection(image_path, det, label)
                     det["class"] = detailed_class
                     det["deep_analyzed"] = True
+
+        # Step 7b: Qwen analysis (local VLM)
+        if qwen_classes:
+            qwen_items = []
+            for d in all_detections:
+                label = d.get("original_class", d["class"])
+                if label in qwen_classes:
+                    threshold = class_thresholds.get(label, 0.5)
+                    if d.get("score", 0) >= threshold:
+                        qwen_items.append(d)
+
+            total_qwen = len(qwen_items)
+            if total_qwen > 0:
+                yield {
+                    "type": "progress",
+                    "stage": "qwen_analysis",
+                    "message": f"Analisi Qwen VL (locale): 0/{total_qwen}",
+                    "percent": 90
+                }
+                await asyncio.sleep(0.05)
+
+                for idx, det in enumerate(qwen_items):
+                    yield {
+                        "type": "progress",
+                        "stage": "qwen_analysis",
+                        "message": f"Analisi Qwen VL (locale): {idx + 1}/{total_qwen}",
+                        "percent": 90 + int((idx / total_qwen) * 4),
+                        "current_item": idx + 1,
+                        "total_items": total_qwen
+                    }
+                    await asyncio.sleep(0.01)
+
+                    label = det.get("original_class", det["class"])
+                    if "original_class" not in det:
+                        det["original_class"] = det["class"]
+                    detailed_class = qwen_analyze_detection(image_path, det, label)
+                    det["class"] = detailed_class
+                    det["qwen_analyzed"] = True
 
         # Step 8: Geolocation
         yield {"type": "progress", "stage": "geolocation", "message": "Calcolo coordinate GPS...", "percent": 95}
