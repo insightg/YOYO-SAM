@@ -41,3 +41,10 @@ models/*.pt
 
 # SAM3 submodule
 sam3/
+
+# SAM3D submodule
+sam3d/
+
+# Data files (generated)
+detections/
+cache_3d/

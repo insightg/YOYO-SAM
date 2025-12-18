@@ -18,7 +18,7 @@ import cv2
 import numpy as np
 import torch
 from PIL import Image
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -30,7 +30,8 @@ _preprocess_executor = ThreadPoolExecutor(max_workers=4)
 # Add local modules to path
 from geolocate import get_poses, geolocate_detections
 from deep_analyze import is_deep_class, deep_analyze_detection
-from qwen_analyze import qwen_analyze_detection, unload_qwen
+from qwen_analyze import qwen_analyze_detection, unload_qwen, qwenq_analyze_detection, unload_qwen_quantized
+from tree_analyze import tree_analyze_detection, unload_bioclip, batch_analyze_trees
 from local_analyze import is_local_class, local_analyze_detection, batch_analyze_detections
 from crack_analyze import is_crack_class
 from reconstruct_3d import (
@@ -675,7 +676,9 @@ async def detect(request: DetectRequest):
         # Parse classes (support CSV and legacy formats)
         local_classes = {}   # label -> module (OCR, GTSRB, RDD)
         deep_classes = {}    # label -> True
-        qwen_classes = {}    # label -> True (local Qwen VL analysis)
+        qwen_classes = {}    # label -> True (local Qwen VL analysis, full precision)
+        qwenq_classes = {}   # label -> True (local Qwen VL analysis, 4-bit quantized)
+        tree_classes = {}    # label -> True (BioCLIP tree species classification)
         class_thresholds = {}  # label -> min_threshold
         detection_classes = []  # descriptions for SAM3
         label_to_description = {}  # label -> description mapping
@@ -707,6 +710,12 @@ async def detect(request: DetectRequest):
             if "qwen" in modules:
                 qwen_classes[label] = True
 
+            if "qwenq" in modules:
+                qwenq_classes[label] = True
+
+            if "tree" in modules:
+                tree_classes[label] = True
+
             # Use DESCRIPTION for SAM3 detection, not label
             detection_classes.append(description)
 
@@ -732,25 +741,35 @@ async def detect(request: DetectRequest):
                 det["description"] = desc
 
         # Perform local analysis for marked classes (GTSRB/RDD model) - apply class threshold
+        # Local analysis (GTSRB/RDD/OCR) - BATCH PROCESSING
         if local_classes:
+            # Group by class
+            local_by_class = {}
             for det in detections:
                 if det["class"] in local_classes:
-                    # Use class-specific threshold if set, otherwise no minimum
                     min_threshold = class_thresholds.get(det["class"])
-                    if min_threshold is not None and det.get("score", 0) < min_threshold:
-                        continue  # Skip detections below threshold
-                    det["original_class"] = det["class"]
-                    module = local_classes[det["class"]]  # Get explicit module
-                    detailed_class, local_confidence = local_analyze_detection(
-                        image_path,
-                        det,
-                        det["class"],
-                        module
-                    )
-                    det["class"] = detailed_class
-                    det["local_analyzed"] = True
-                    det["local_confidence"] = round(local_confidence, 4)
-                    det["local_module"] = module if module != "auto" else ("RDD" if is_crack_class(det["original_class"]) else "GTSRB")
+                    if min_threshold is None or det.get("score", 0) >= min_threshold:
+                        cls = det["class"]
+                        if cls not in local_by_class:
+                            local_by_class[cls] = []
+                        local_by_class[cls].append(det)
+
+            if local_by_class:
+                # Load image once
+                local_image = Image.open(image_path).convert("RGB")
+
+                for cls, dets in local_by_class.items():
+                    module = local_classes.get(cls, "auto")
+                    # Batch inference
+                    results = batch_analyze_detections(local_image, dets, cls, module)
+
+                    base_clean = cls.replace(" ", "_").lower()
+                    for det, (label, conf) in zip(dets, results):
+                        det["original_class"] = det["class"]
+                        det["class"] = f"{base_clean}.{label}"
+                        det["local_analyzed"] = True
+                        det["local_confidence"] = round(conf, 4)
+                        det["local_module"] = module if module != "auto" else ("RDD" if is_crack_class(cls) else "GTSRB")
 
         # Perform deep analysis for marked classes (LLM) - apply class threshold or default 0.5
         if deep_classes:
@@ -791,6 +810,60 @@ async def detect(request: DetectRequest):
             # Cleanup: unload Qwen and reload SAM
             unload_qwen()
             reload_sam_to_gpu()
+
+        # Step: Qwen 4-bit quantized analysis (NO SAM unload needed)
+        if qwenq_classes:
+            for det in detections:
+                label = det.get("original_class", det["class"])
+                if label in qwenq_classes:
+                    min_threshold = class_thresholds.get(label, 0.5)
+                    if det.get("score", 0) >= min_threshold:
+                        if "original_class" not in det:
+                            det["original_class"] = det["class"]
+                        detailed_class = qwenq_analyze_detection(
+                            image_path,
+                            det,
+                            label
+                        )
+                        det["class"] = detailed_class
+                        det["qwenq_analyzed"] = True
+
+            # Cleanup: unload Qwen 4-bit and reload SAM
+            unload_qwen_quantized()
+            reload_sam_to_gpu()
+
+        # Step: Tree species classification with BioCLIP-2 - BATCH PROCESSING
+        if tree_classes:
+            # Group by class label
+            tree_by_class = {}
+            for det in detections:
+                label = det.get("original_class", det["class"])
+                if label in tree_classes:
+                    min_threshold = class_thresholds.get(label, 0.5)
+                    if det.get("score", 0) >= min_threshold:
+                        if label not in tree_by_class:
+                            tree_by_class[label] = []
+                        tree_by_class[label].append(det)
+
+            if tree_by_class:
+                # Load image once
+                tree_image = Image.open(image_path).convert("RGB")
+
+                for label, dets in tree_by_class.items():
+                    # Set original_class before batch
+                    for det in dets:
+                        if "original_class" not in det:
+                            det["original_class"] = det["class"]
+
+                    # Batch inference
+                    results = batch_analyze_trees(tree_image, dets, label)
+
+                    for det, detailed_class in zip(dets, results):
+                        det["class"] = detailed_class
+                        det["tree_analyzed"] = True
+
+                # Cleanup: unload BioCLIP
+                unload_bioclip()
 
         # Get image dimensions for frontend
         img = Image.open(image_path)
@@ -873,7 +946,9 @@ async def detect_with_progress(image_name: str, classes: list[str], confidence: 
         # Parse classes (support CSV and legacy formats)
         local_classes = {}   # label -> module (OCR, GTSRB, RDD)
         deep_classes = {}    # label -> True
-        qwen_classes = {}    # label -> True (local Qwen VL analysis)
+        qwen_classes = {}    # label -> True (local Qwen VL analysis, full precision)
+        qwenq_classes = {}   # label -> True (local Qwen VL analysis, 4-bit quantized)
+        tree_classes = {}    # label -> True (BioCLIP tree species classification)
         class_thresholds = {}  # label -> min_threshold
         detection_classes = []  # descriptions for SAM3
         label_to_description = {}  # label -> description mapping
@@ -904,6 +979,12 @@ async def detect_with_progress(image_name: str, classes: list[str], confidence: 
 
             if "qwen" in modules:
                 qwen_classes[label] = True
+
+            if "qwenq" in modules:
+                qwenq_classes[label] = True
+
+            if "tree" in modules:
+                tree_classes[label] = True
 
             # Use DESCRIPTION for SAM3 detection, not label
             detection_classes.append(description)
@@ -1224,6 +1305,104 @@ async def detect_with_progress(image_name: str, classes: list[str], confidence: 
             # Cleanup: unload Qwen and reload SAM
             unload_qwen()
             reload_sam_to_gpu()
+
+        # Step 7c: Qwen 4-bit quantized analysis (NO SAM unload needed)
+        if qwenq_classes:
+            qwenq_items = []
+            for d in all_detections:
+                label = d.get("original_class", d["class"])
+                if label in qwenq_classes:
+                    threshold = class_thresholds.get(label, 0.5)
+                    if d.get("score", 0) >= threshold:
+                        qwenq_items.append(d)
+
+            total_qwenq = len(qwenq_items)
+            if total_qwenq > 0:
+                yield {
+                    "type": "progress",
+                    "stage": "qwenq_analysis",
+                    "message": f"Analisi Qwen VL 4-bit: 0/{total_qwenq}",
+                    "percent": 90
+                }
+                await asyncio.sleep(0.05)
+
+                for idx, det in enumerate(qwenq_items):
+                    yield {
+                        "type": "progress",
+                        "stage": "qwenq_analysis",
+                        "message": f"Analisi Qwen VL 4-bit: {idx + 1}/{total_qwenq}",
+                        "percent": 90 + int((idx / total_qwenq) * 4),
+                        "current_item": idx + 1,
+                        "total_items": total_qwenq
+                    }
+                    await asyncio.sleep(0.01)
+
+                    label = det.get("original_class", det["class"])
+                    if "original_class" not in det:
+                        det["original_class"] = det["class"]
+                    detailed_class = qwenq_analyze_detection(image_path, det, label)
+                    det["class"] = detailed_class
+                    det["qwenq_analyzed"] = True
+
+            # Cleanup: unload Qwen 4-bit and reload SAM
+            unload_qwen_quantized()
+            reload_sam_to_gpu()
+
+        # Step 7d: Tree species classification with BioCLIP-2 - BATCH PROCESSING
+        if tree_classes:
+            # Group by class label
+            tree_by_class = {}
+            for d in all_detections:
+                label = d.get("original_class", d["class"])
+                if label in tree_classes:
+                    threshold = class_thresholds.get(label, 0.5)
+                    if d.get("score", 0) >= threshold:
+                        if label not in tree_by_class:
+                            tree_by_class[label] = []
+                        tree_by_class[label].append(d)
+
+            total_tree = sum(len(dets) for dets in tree_by_class.values())
+            if total_tree > 0:
+                yield {
+                    "type": "progress",
+                    "stage": "tree_analysis",
+                    "message": f"Classificazione alberi batch (BioCLIP-2): {total_tree} items",
+                    "percent": 92
+                }
+                await asyncio.sleep(0.05)
+
+                # Load image once for all detections
+                tree_image = Image.open(image_path).convert("RGB")
+
+                # Process each class group in batch
+                processed = 0
+                for label, dets in tree_by_class.items():
+                    yield {
+                        "type": "progress",
+                        "stage": "tree_analysis",
+                        "message": f"Batch BioCLIP-2: {label} ({len(dets)} items)",
+                        "percent": 92 + int((processed / total_tree) * 3),
+                        "current_class": label
+                    }
+                    await asyncio.sleep(0.01)
+
+                    # Set original_class before batch processing
+                    for det in dets:
+                        if "original_class" not in det:
+                            det["original_class"] = det["class"]
+
+                    # Batch inference
+                    results = batch_analyze_trees(tree_image, dets, label)
+
+                    # Apply results
+                    for det, detailed_class in zip(dets, results):
+                        det["class"] = detailed_class
+                        det["tree_analyzed"] = True
+
+                    processed += len(dets)
+
+            # Cleanup: unload BioCLIP
+            unload_bioclip()
 
         # Step 8: Geolocation
         yield {"type": "progress", "stage": "geolocation", "message": "Calcolo coordinate GPS...", "percent": 95}
@@ -1846,6 +2025,235 @@ async def get_panorama_info(image_name: str):
             "next": next_image
         }
     }
+
+
+@app.get("/api/export-panoramas")
+async def export_panoramas_format():
+    """
+    Export all detections in Panoramas app format.
+    Returns CSV compatible with the Panoramas visualization tab.
+    """
+    import csv
+    from io import StringIO
+    from fastapi.responses import StreamingResponse
+
+    # Headers matching the Panoramas app format
+    headers = [
+        'object_id', 'unique_id', 'class_name', 'confidence',
+        'latitude', 'longitude',
+        'bbox_xmin', 'bbox_ymin', 'bbox_xmax', 'bbox_ymax',
+        'image_file', 'timestamp',
+        'camera_latitude', 'camera_longitude', 'camera_altitude',
+        'camera_heading', 'camera_pitch', 'camera_roll',
+        'position_accuracy_north', 'position_accuracy_east', 'position_accuracy_down',
+        'estimated_distance', 'georef_method', 'distance_confidence',
+        'position_error_meters', 'model'
+    ]
+
+    # Load poses for camera data
+    poses = get_poses()
+
+    # Collect all detections from saved CSV files
+    all_rows = []
+    object_id = 0
+
+    # List all detection CSV files
+    if DETECTIONS_DIR.exists():
+        for csv_file in sorted(DETECTIONS_DIR.glob("*.csv")):
+            image_stem = csv_file.stem
+            image_name = f"{image_stem}.jpg"
+
+            # Get camera pose
+            pose = poses.get(image_name)
+
+            # Read detections from CSV
+            try:
+                with open(csv_file, 'r', encoding='utf-8') as f:
+                    reader = csv.DictReader(f)
+                    for det in reader:
+                        object_id += 1
+
+                        # Get bbox
+                        bbox_x1 = int(float(det.get('bbox_x1', 0)))
+                        bbox_y1 = int(float(det.get('bbox_y1', 0)))
+                        bbox_x2 = int(float(det.get('bbox_x2', 0)))
+                        bbox_y2 = int(float(det.get('bbox_y2', 0)))
+
+                        # Get GPS coordinates
+                        lat = det.get('gps_lat', '')
+                        lon = det.get('gps_lon', '')
+
+                        # Camera info
+                        cam_lat = pose.latitude if pose else det.get('camera_lat', '')
+                        cam_lon = pose.longitude if pose else det.get('camera_lon', '')
+                        cam_alt = pose.altitude if pose else ''
+                        cam_heading = pose.heading if pose else det.get('camera_heading', '')
+                        cam_pitch = pose.pitch if pose else ''
+                        cam_roll = pose.roll if pose else ''
+
+                        # Build class name (use original_class if available, otherwise class)
+                        class_name = det.get('class', '')
+
+                        # Confidence
+                        confidence = det.get('score', '0')
+
+                        # Estimated distance (simple calculation)
+                        estimated_distance = det.get('distance_m', '0.5')
+
+                        row = {
+                            'object_id': object_id,
+                            'unique_id': f'DET_{object_id:05d}',
+                            'class_name': class_name,
+                            'confidence': confidence,
+                            'latitude': lat,
+                            'longitude': lon,
+                            'bbox_xmin': bbox_x1,
+                            'bbox_ymin': bbox_y1,
+                            'bbox_xmax': bbox_x2,
+                            'bbox_ymax': bbox_y2,
+                            'image_file': image_stem,
+                            'timestamp': '',
+                            'camera_latitude': f'{cam_lat:.8f}' if isinstance(cam_lat, float) else cam_lat,
+                            'camera_longitude': f'{cam_lon:.8f}' if isinstance(cam_lon, float) else cam_lon,
+                            'camera_altitude': f'{cam_alt:.2f}' if isinstance(cam_alt, float) else cam_alt,
+                            'camera_heading': f'{cam_heading:.2f}' if isinstance(cam_heading, float) else cam_heading,
+                            'camera_pitch': f'{cam_pitch:.2f}' if isinstance(cam_pitch, float) else cam_pitch,
+                            'camera_roll': f'{cam_roll:.2f}' if isinstance(cam_roll, float) else cam_roll,
+                            'position_accuracy_north': '5.0',
+                            'position_accuracy_east': '5.0',
+                            'position_accuracy_down': '5.0',
+                            'estimated_distance': estimated_distance,
+                            'georef_method': 'simple',
+                            'distance_confidence': '0.4',
+                            'position_error_meters': '7.07',
+                            'model': 'sam3_yoyo'
+                        }
+                        all_rows.append(row)
+
+            except Exception as e:
+                print(f"Error reading {csv_file}: {e}")
+                continue
+
+    # Generate CSV
+    output = StringIO()
+    writer = csv.DictWriter(output, fieldnames=headers)
+    writer.writeheader()
+    writer.writerows(all_rows)
+
+    # Return as downloadable file
+    output.seek(0)
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": "attachment; filename=detections.csv"
+        }
+    )
+
+
+@app.get("/api/export-panoramas-current")
+async def export_panoramas_current(request: Request):
+    """
+    Export detections for current session (passed via query params).
+    Useful for exporting without saving first.
+    """
+    return {"message": "Use POST /api/export-panoramas-batch for batch export"}
+
+
+class ExportPanoramasRequest(BaseModel):
+    """Request model for batch export."""
+    detections: list
+    image_name: str
+    camera: dict = None
+
+
+@app.post("/api/export-panoramas-batch")
+async def export_panoramas_batch(request: ExportPanoramasRequest):
+    """
+    Export detections in Panoramas format from request body.
+    Returns CSV data directly.
+    """
+    import csv
+    from io import StringIO
+    from fastapi.responses import StreamingResponse
+
+    headers = [
+        'object_id', 'unique_id', 'class_name', 'confidence',
+        'latitude', 'longitude',
+        'bbox_xmin', 'bbox_ymin', 'bbox_xmax', 'bbox_ymax',
+        'image_file', 'timestamp',
+        'camera_latitude', 'camera_longitude', 'camera_altitude',
+        'camera_heading', 'camera_pitch', 'camera_roll',
+        'position_accuracy_north', 'position_accuracy_east', 'position_accuracy_down',
+        'estimated_distance', 'georef_method', 'distance_confidence',
+        'position_error_meters', 'model'
+    ]
+
+    poses = get_poses()
+    image_stem = Path(request.image_name).stem
+    pose = poses.get(request.image_name)
+    camera = request.camera or {}
+
+    all_rows = []
+    for idx, det in enumerate(request.detections, 1):
+        bbox = det.get('bbox', [0, 0, 0, 0])
+        x1, y1, x2, y2 = bbox
+
+        # Get GPS
+        lat = det.get('latitude', '')
+        lon = det.get('longitude', '')
+
+        # Camera
+        cam_lat = camera.get('latitude') or (pose.latitude if pose else '')
+        cam_lon = camera.get('longitude') or (pose.longitude if pose else '')
+        cam_alt = pose.altitude if pose else ''
+        cam_heading = camera.get('heading') or (pose.heading if pose else '')
+        cam_pitch = pose.pitch if pose else ''
+        cam_roll = pose.roll if pose else ''
+
+        row = {
+            'object_id': idx,
+            'unique_id': f'DET_{idx:05d}',
+            'class_name': det.get('class', ''),
+            'confidence': f"{det.get('score', 0):.3f}",
+            'latitude': f'{lat:.8f}' if isinstance(lat, float) else lat,
+            'longitude': f'{lon:.8f}' if isinstance(lon, float) else lon,
+            'bbox_xmin': int(x1),
+            'bbox_ymin': int(y1),
+            'bbox_xmax': int(x2),
+            'bbox_ymax': int(y2),
+            'image_file': image_stem,
+            'timestamp': '',
+            'camera_latitude': f'{cam_lat:.8f}' if isinstance(cam_lat, float) else cam_lat,
+            'camera_longitude': f'{cam_lon:.8f}' if isinstance(cam_lon, float) else cam_lon,
+            'camera_altitude': f'{cam_alt:.2f}' if isinstance(cam_alt, float) else cam_alt,
+            'camera_heading': f'{cam_heading:.2f}' if isinstance(cam_heading, float) else cam_heading,
+            'camera_pitch': f'{cam_pitch:.2f}' if isinstance(cam_pitch, float) else cam_pitch,
+            'camera_roll': f'{cam_roll:.2f}' if isinstance(cam_roll, float) else cam_roll,
+            'position_accuracy_north': '5.0',
+            'position_accuracy_east': '5.0',
+            'position_accuracy_down': '5.0',
+            'estimated_distance': det.get('distance_m', '0.5'),
+            'georef_method': 'simple',
+            'distance_confidence': '0.4',
+            'position_error_meters': '7.07',
+            'model': 'sam3_yoyo'
+        }
+        all_rows.append(row)
+
+    output = StringIO()
+    writer = csv.DictWriter(output, fieldnames=headers)
+    writer.writeheader()
+    writer.writerows(all_rows)
+
+    output.seek(0)
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": f"attachment; filename={image_stem}_detections.csv"
+        }
+    )
 
 
 @app.on_event("startup")

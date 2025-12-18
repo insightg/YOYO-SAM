@@ -100,7 +100,7 @@
             </div>
 
             <div class="control-group classes-group">
-                <label for="classes">Classes (CSV: soglia,label,descrizione,moduli) <small class="deep-hint">moduli: ocr, gtsrb, rdd, deep, qwen</small></label>
+                <label for="classes">Classes (CSV: soglia,label,descrizione,moduli) <small class="deep-hint">moduli: ocr, gtsrb, rdd, deep, qwen, qwenq, tree</small></label>
                 <textarea id="classes" rows="15">30,Cartello_stradale,road sign,gtsrb
 40,Dare_precedenza,yield sign,
 40,Limite_velocita,speed limit sign,
@@ -130,6 +130,9 @@
                 <button id="export-btn" class="export-button" disabled>
                     EXPORT CSV
                 </button>
+                <button id="export-panoramas-btn" class="export-button panoramas" disabled>
+                    EXPORT PANORAMAS
+                </button>
             </div>
 
             <div class="model-status" id="model-status">
@@ -151,6 +154,7 @@
                 <span class="progress-percent" id="progress-percent">0%</span>
             </div>
             <p class="loading-detail" id="loading-detail"></p>
+            <button class="stop-detection-btn" id="stop-detection-btn">Stop Detection</button>
             <p class="loading-hint">This may take 1-2 minutes for large images</p>
         </div>
     </div>

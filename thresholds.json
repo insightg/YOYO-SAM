@@ -19,5 +19,7 @@
   "__parent__Tower clocks": 0.9,
   "__parent__Directional arrows": 0.2,
   "__parent__street crack": 0.1,
-  "street crack": 0.1
+  "street crack": 0.1,
+  "__parent__passo_carraio": 0.55,
+  "passo_carraio.nd": 0.55
 }

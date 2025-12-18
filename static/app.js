@@ -52,10 +52,12 @@ const modalCanvas = document.getElementById('modal-canvas');
 const modalTitle = document.getElementById('modal-title');
 const modalInfo = document.getElementById('modal-info');
 const exportBtn = document.getElementById('export-btn');
+const exportPanoramasBtn = document.getElementById('export-panoramas-btn');
 const classThresholdsGroup = document.getElementById('class-thresholds-group');
 const classThresholdsContainer = document.getElementById('class-thresholds');
 const resetThresholdsBtn = document.getElementById('reset-thresholds-btn');
 const saveThresholdsBtn = document.getElementById('save-thresholds-btn');
+const stopDetectionBtn = document.getElementById('stop-detection-btn');
 
 let savedDefaultThresholds = {};  // Loaded from server at startup
 
@@ -120,11 +122,17 @@ function setupEventListeners() {
     // Export CSV button
     exportBtn.addEventListener('click', exportDetectionsCSV);
 
+    // Export Panoramas format button
+    exportPanoramasBtn.addEventListener('click', exportPanoramasCSV);
+
     // Reset per-class thresholds
     resetThresholdsBtn.addEventListener('click', resetClassThresholds);
 
     // Save thresholds as defaults
     saveThresholdsBtn.addEventListener('click', saveDefaultThresholds);
+
+    // Stop detection button (in progress modal)
+    stopDetectionBtn.addEventListener('click', cancelDetection);
 
     // Modal close handlers
     modalClose.addEventListener('click', closeModal);
@@ -499,6 +507,7 @@ function clearDetections() {
     classThresholdsContainer.innerHTML = '';
     saveImageBtn.disabled = true;
     exportBtn.disabled = true;
+    exportPanoramasBtn.disabled = true;
 }
 
 function filterAndDisplayDetections() {
@@ -519,6 +528,7 @@ function filterAndDisplayDetections() {
     // Enable/disable save and export buttons based on detections
     saveImageBtn.disabled = detections.length === 0;
     exportBtn.disabled = detections.length === 0;
+    exportPanoramasBtn.disabled = detections.length === 0;
 }
 
 function buildClassThresholdsUI() {
@@ -672,6 +682,7 @@ function filterAndDisplayDetectionsNoRebuild() {
 
     saveImageBtn.disabled = detections.length === 0;
     exportBtn.disabled = detections.length === 0;
+    exportPanoramasBtn.disabled = detections.length === 0;
 }
 
 function resetClassThresholds() {
@@ -1612,6 +1623,60 @@ function exportDetectionsCSV() {
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
+}
+
+// Export detections in Panoramas app format
+async function exportPanoramasCSV() {
+    if (!currentImage || detections.length === 0) {
+        alert('No detections to export');
+        return;
+    }
+
+    try {
+        exportPanoramasBtn.disabled = true;
+        exportPanoramasBtn.textContent = 'EXPORTING...';
+
+        const response = await fetch('/api/export-panoramas-batch', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                image_name: currentImage,
+                detections: detections,
+                camera: cameraInfo
+            })
+        });
+
+        if (!response.ok) {
+            throw new Error('Failed to export');
+        }
+
+        // Get CSV content from response
+        const csvContent = await response.text();
+
+        // Create download
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+
+        // Generate filename
+        const baseName = currentImage.replace(/\.[^.]+$/, '');
+        a.download = `${baseName}_panoramas.csv`;
+
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+
+        console.log(`Exported ${detections.length} detections in Panoramas format`);
+
+    } catch (error) {
+        console.error('Error exporting Panoramas CSV:', error);
+        alert('Error exporting: ' + error.message);
+    } finally {
+        exportPanoramasBtn.disabled = false;
+        exportPanoramasBtn.textContent = 'EXPORT PANORAMAS';
+    }
 }
 
 // ============ 3D Viewer Functions ============

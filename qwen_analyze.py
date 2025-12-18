@@ -11,10 +11,15 @@ from PIL import Image
 from pathlib import Path
 from typing import Optional
 
-# Global model cache
+# Global model cache (full precision)
 _model = None
 _processor = None
 _qwen_loaded = False
+
+# Global model cache (4-bit quantized)
+_model_q = None
+_processor_q = None
+_qwenq_loaded = False
 
 # Category-specific guidance (same as deep_analyze.py)
 CATEGORY_HINTS = {
@@ -111,6 +116,72 @@ def get_model():
 def is_qwen_loaded() -> bool:
     """Check if Qwen model is currently loaded."""
     return _qwen_loaded
+
+
+def get_model_quantized():
+    """Load or return cached Qwen3-VL model with 4-bit quantization.
+
+    This version uses ~8-10GB VRAM instead of ~20GB.
+    Still requires SAM unload due to memory constraints.
+    """
+    global _model_q, _processor_q, _qwenq_loaded
+
+    if _model_q is None:
+        # Unload SAM from GPU to make room
+        _unload_sam_for_qwen()
+
+        from transformers import AutoModelForImageTextToText, AutoProcessor, BitsAndBytesConfig
+
+        model_name = "Qwen/Qwen3-VL-30B-A3B-Instruct"
+        print(f"Loading {model_name} (4-bit quantized)...")
+
+        # Configure 4-bit quantization
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type="nf4"
+        )
+
+        _processor_q = AutoProcessor.from_pretrained(model_name, trust_remote_code=True)
+        _model_q = AutoModelForImageTextToText.from_pretrained(
+            model_name,
+            quantization_config=quantization_config,
+            device_map="auto",
+            trust_remote_code=True
+        )
+        _qwenq_loaded = True
+        print("Qwen3-VL (4-bit) loaded successfully")
+
+    return _model_q, _processor_q
+
+
+def unload_qwen_quantized():
+    """Unload quantized Qwen model from GPU to free memory."""
+    global _model_q, _processor_q, _qwenq_loaded
+
+    if _model_q is None:
+        return
+
+    print("Unloading Qwen (4-bit) from GPU...")
+    try:
+        del _model_q
+        del _processor_q
+        _model_q = None
+        _processor_q = None
+        _qwenq_loaded = False
+
+        gc.collect()
+        torch.cuda.empty_cache()
+        torch.cuda.synchronize()
+        print("Qwen (4-bit) unloaded, GPU memory freed")
+    except Exception as e:
+        print(f"Error unloading Qwen (4-bit): {e}")
+
+
+def is_qwenq_loaded() -> bool:
+    """Check if quantized Qwen model is currently loaded."""
+    return _qwenq_loaded
 
 
 def build_contextual_prompt(category: str) -> str:
@@ -269,6 +340,95 @@ def qwen_analyze_detection(
 
     except Exception as e:
         print(f"Error in Qwen analysis: {e}")
+        base_clean = base_class.replace(" ", "_").lower()
+        return f"{base_clean}.generic"
+
+
+def analyze_with_qwen_quantized(image: Image.Image, category: str) -> str:
+    """Analyze image using 4-bit quantized Qwen3-VL model."""
+    try:
+        model, processor = get_model_quantized()
+
+        prompt = build_contextual_prompt(category)
+
+        # Prepare messages in Qwen VL format
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": image},
+                    {"type": "text", "text": prompt}
+                ]
+            }
+        ]
+
+        # Process input
+        text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        inputs = processor(
+            text=[text],
+            images=[image],
+            return_tensors="pt",
+            padding=True
+        ).to(model.device)
+
+        # Generate response
+        with torch.no_grad():
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=50,
+                do_sample=False
+            )
+
+        # Decode response (skip input tokens)
+        response = processor.batch_decode(
+            outputs[:, inputs.input_ids.shape[1]:],
+            skip_special_tokens=True
+        )[0]
+
+        return clean_response(response)
+
+    except Exception as e:
+        print(f"Qwen (4-bit) analysis error: {e}")
+        return "error"
+
+
+def qwenq_analyze_detection(
+    image_path: Path,
+    detection: dict,
+    base_class: str
+) -> str:
+    """
+    Analyze detection using 4-bit quantized Qwen3-VL model.
+
+    This version uses less VRAM and can coexist with SAM.
+
+    Args:
+        image_path: Path to the full image
+        detection: Detection dict with bbox
+        base_class: The base class name
+
+    Returns:
+        Formatted class name: base_class.subclass
+    """
+    try:
+        # Load and crop image
+        image = Image.open(image_path).convert("RGB")
+        cropped = crop_detection(image, detection["bbox"])
+
+        # Analyze with quantized Qwen
+        subclass = analyze_with_qwen_quantized(cropped, base_class)
+
+        # Format result
+        base_clean = base_class.replace(" ", "_").lower()
+
+        # If not identifiable, return base_class.generic
+        if subclass in ("unidentified", "error", "generic"):
+            return f"{base_clean}.generic"
+
+        return f"{base_clean}.{subclass}"
+
+    except Exception as e:
+        print(f"Error in Qwen (4-bit) analysis: {e}")
         base_clean = base_class.replace(" ", "_").lower()
         return f"{base_clean}.generic"
 

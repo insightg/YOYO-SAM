@@ -1,13 +1,17 @@
 road sign - local
-speed limit sign - local
-traffic sign - local
-stop sign
 yield sign
+speed limit sign
+traffic light
 street light pole
 light pole
 manhole cover
+road marking
 crosswalk
 pedestrian crossing
+no parking sign
+one way sign
+road sign
+parking sign
 fire hydrant
 traffic cone
 road barrier

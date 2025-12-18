@@ -764,6 +764,14 @@ select:focus {
     background: #60a5fa;
 }
 
+.export-button.panoramas {
+    background: #8b5cf6;
+}
+
+.export-button.panoramas:hover:not(:disabled) {
+    background: #a78bfa;
+}
+
 .detect-button:disabled, .save-button:disabled, .export-button:disabled {
     background: var(--bg-tertiary);
     color: var(--text-secondary);
@@ -891,6 +899,28 @@ select:focus {
     color: var(--success);
     min-height: 20px;
     margin-top: 5px;
+}
+
+.stop-detection-btn {
+    margin-top: 15px;
+    padding: 10px 30px;
+    background: var(--error);
+    color: white;
+    border: none;
+    border-radius: 6px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all 0.2s ease;
+}
+
+.stop-detection-btn:hover {
+    background: #c0392b;
+    transform: scale(1.05);
+}
+
+.stop-detection-btn:active {
+    transform: scale(0.98);
 }
 
 /* Detection Modal */
