@@ -1,9 +1,0 @@
-10 street crack
-50 road vertical sign - deep
-80 light pole
-30 manhole
-81 tree - deep
-40 recharge station
-50 circular street mirror
-20 house number plate - ocr
-10, passo_carraio,no parking sign on white plate, ocr

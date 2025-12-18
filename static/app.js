@@ -2235,3 +2235,414 @@ function openPanoramaViewer() {
         console.error('PanoramaViewer not initialized');
     }
 }
+
+// ============================================================
+// TAB SYSTEM & BATCH PROCESSING
+// ============================================================
+
+// Batch state
+let batchSelectedImages = new Set();
+let batchAllImages = [];
+let batchEventSource = null;
+let batchResults = [];
+let batchIsRunning = false;
+
+/**
+ * Switch between tabs
+ */
+function switchTab(tabName) {
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.tab === tabName);
+    });
+    document.querySelectorAll('.tab-content').forEach(content => {
+        content.classList.toggle('active', content.id === `tab-${tabName}`);
+    });
+
+    // Load batch image grid when switching to batch tab
+    if (tabName === 'batch' && batchAllImages.length === 0) {
+        loadBatchImageGrid();
+        loadBatchClassLists();
+    }
+}
+
+/**
+ * Initialize tab event listeners
+ */
+function initTabs() {
+    document.querySelectorAll('.tab-btn').forEach(btn => {
+        btn.addEventListener('click', () => switchTab(btn.dataset.tab));
+    });
+}
+
+/**
+ * Load class lists into batch dropdown
+ */
+async function loadBatchClassLists() {
+    try {
+        const response = await fetch('/api/class-lists');
+        const data = await response.json();
+        const select = document.getElementById('batch-class-list');
+
+        // Clear existing options except first
+        while (select.options.length > 1) {
+            select.remove(1);
+        }
+
+        // API returns {lists: [...]}
+        const lists = data.lists || [];
+        lists.forEach(list => {
+            const option = document.createElement('option');
+            option.value = list.name;
+            option.textContent = list.name;
+            select.appendChild(option);
+        });
+    } catch (error) {
+        console.error('Error loading class lists:', error);
+    }
+}
+
+/**
+ * Load all images into batch grid
+ */
+async function loadBatchImageGrid() {
+    try {
+        const response = await fetch('/api/images?limit=5000');
+        const data = await response.json();
+        // API returns {images: ["name1.jpg", "name2.jpg", ...]}
+        batchAllImages = (data.images || []).map(name => ({ name }));
+
+        const grid = document.getElementById('batch-image-grid');
+        grid.innerHTML = batchAllImages.map(img => `
+            <div class="batch-thumb" data-image="${img.name}">
+                <input type="checkbox" class="batch-checkbox" data-image="${img.name}">
+                <img src="/api/thumbnail/${img.name}" loading="lazy" alt="${img.name}">
+                <span class="batch-thumb-name">${img.name.length > 20 ? img.name.substring(0, 17) + '...' : img.name}</span>
+            </div>
+        `).join('');
+
+        // Add click handlers
+        grid.querySelectorAll('.batch-thumb').forEach(thumb => {
+            thumb.addEventListener('click', (e) => {
+                if (e.target.classList.contains('batch-checkbox')) return;
+                const checkbox = thumb.querySelector('.batch-checkbox');
+                checkbox.checked = !checkbox.checked;
+                toggleBatchImage(thumb.dataset.image, checkbox.checked);
+            });
+
+            thumb.querySelector('.batch-checkbox').addEventListener('change', (e) => {
+                toggleBatchImage(thumb.dataset.image, e.target.checked);
+            });
+        });
+
+        updateBatchSelectedCount();
+    } catch (error) {
+        console.error('Error loading batch images:', error);
+    }
+}
+
+/**
+ * Toggle image selection
+ */
+function toggleBatchImage(imageName, selected) {
+    const thumb = document.querySelector(`.batch-thumb[data-image="${imageName}"]`);
+    if (selected) {
+        batchSelectedImages.add(imageName);
+        thumb?.classList.add('selected');
+    } else {
+        batchSelectedImages.delete(imageName);
+        thumb?.classList.remove('selected');
+    }
+    updateBatchSelectedCount();
+}
+
+/**
+ * Update selected count display
+ */
+function updateBatchSelectedCount() {
+    const count = batchSelectedImages.size;
+    document.getElementById('batch-selected-count').textContent = `${count} selezionate`;
+    document.getElementById('batch-start').disabled = count === 0 || batchIsRunning;
+}
+
+/**
+ * Select all images
+ */
+function batchSelectAll() {
+    batchAllImages.forEach(img => batchSelectedImages.add(img.name));
+    document.querySelectorAll('.batch-thumb').forEach(thumb => {
+        thumb.classList.add('selected');
+        thumb.querySelector('.batch-checkbox').checked = true;
+    });
+    updateBatchSelectedCount();
+}
+
+/**
+ * Deselect all images
+ */
+function batchSelectNone() {
+    batchSelectedImages.clear();
+    document.querySelectorAll('.batch-thumb').forEach(thumb => {
+        thumb.classList.remove('selected');
+        thumb.querySelector('.batch-checkbox').checked = false;
+    });
+    updateBatchSelectedCount();
+}
+
+/**
+ * Select range of images
+ */
+function batchSelectRange() {
+    const start = prompt('Immagine iniziale (numero):', '1');
+    const end = prompt('Immagine finale (numero):', String(batchAllImages.length));
+
+    if (start === null || end === null) return;
+
+    const startIdx = Math.max(0, parseInt(start) - 1);
+    const endIdx = Math.min(batchAllImages.length, parseInt(end));
+
+    batchSelectNone();
+
+    for (let i = startIdx; i < endIdx; i++) {
+        const img = batchAllImages[i];
+        batchSelectedImages.add(img.name);
+        const thumb = document.querySelector(`.batch-thumb[data-image="${img.name}"]`);
+        if (thumb) {
+            thumb.classList.add('selected');
+            thumb.querySelector('.batch-checkbox').checked = true;
+        }
+    }
+    updateBatchSelectedCount();
+}
+
+/**
+ * Start batch processing
+ */
+async function startBatch() {
+    if (batchSelectedImages.size === 0) return;
+
+    const classList = document.getElementById('batch-class-list').value;
+    if (!classList) {
+        alert('Seleziona una lista di classi');
+        return;
+    }
+
+    // Get configuration
+    const confidence = parseInt(document.getElementById('batch-confidence').value) / 100;
+    const tiles = document.getElementById('batch-tiles').value;
+    const mode = document.getElementById('batch-mode').value;
+
+    // Load class list content
+    let classes = '';
+    try {
+        const response = await fetch(`/api/class-list/${classList}`);
+        const data = await response.json();
+        classes = data.content;
+    } catch (error) {
+        console.error('Error loading class list:', error);
+        alert('Errore caricamento lista classi');
+        return;
+    }
+
+    // Prepare UI
+    batchIsRunning = true;
+    batchResults = [];
+    document.getElementById('batch-start').disabled = true;
+    document.getElementById('batch-stop').disabled = false;
+    document.getElementById('batch-export-csv').disabled = true;
+    document.getElementById('batch-progress').style.display = 'block';
+    document.getElementById('batch-log').innerHTML = '';
+
+    const images = Array.from(batchSelectedImages);
+    const total = images.length;
+    let processed = 0;
+
+    logBatch(`Avvio batch: ${total} immagini, mode: ${mode}`);
+
+    // Build URL with parameters
+    const params = new URLSearchParams({
+        images: images.join(','),
+        classes: classes,
+        confidence: confidence,
+        tiles: tiles,
+        mode: mode
+    });
+
+    // Start SSE connection
+    const eventSource = new EventSource(`/api/batch-detect-stream?${params}`);
+    batchEventSource = eventSource;
+
+    eventSource.onmessage = (event) => {
+        // Guard: ignore if we've already stopped
+        if (batchEventSource !== eventSource) return;
+
+        const data = JSON.parse(event.data);
+
+        switch (data.type) {
+            case 'start':
+                logBatch(`[${data.index + 1}/${total}] Elaborazione: ${data.image}`);
+                break;
+
+            case 'progress':
+                // Update individual image progress if needed
+                break;
+
+            case 'complete':
+                processed++;
+                batchResults.push({
+                    image: data.image,
+                    detections: data.detections || [],
+                    count: data.count
+                });
+                updateBatchProgress(processed, total);
+                logBatch(`✓ ${data.image}: ${data.count} detection${data.count !== 1 ? 's' : ''}`);
+                break;
+
+            case 'error':
+                processed++;
+                updateBatchProgress(processed, total);
+                logBatch(`✗ ${data.image}: ${data.error}`, 'error');
+                break;
+
+            case 'done':
+                eventSource.close();
+                if (batchEventSource === eventSource) {
+                    batchEventSource = null;
+                }
+                finishBatch();
+                break;
+        }
+    };
+
+    eventSource.onerror = (error) => {
+        // Guard: ignore if we've already stopped or switched to different connection
+        if (batchEventSource !== eventSource) return;
+
+        console.error('Batch SSE error:', error);
+        eventSource.close();
+        batchEventSource = null;
+        logBatch('Errore connessione', 'error');
+
+        // Don't call stopBatch to avoid recursion, just update UI
+        batchIsRunning = false;
+        document.getElementById('batch-start').disabled = batchSelectedImages.size === 0;
+        document.getElementById('batch-stop').disabled = true;
+        if (batchResults.length > 0) {
+            document.getElementById('batch-export-csv').disabled = false;
+        }
+    };
+}
+
+/**
+ * Update batch progress bar
+ */
+function updateBatchProgress(current, total) {
+    const percent = Math.round((current / total) * 100);
+    document.getElementById('batch-progress-fill').style.width = `${percent}%`;
+    document.getElementById('batch-progress-text').textContent = `${current}/${total} immagini`;
+    document.getElementById('batch-progress-percent').textContent = `${percent}%`;
+}
+
+/**
+ * Log message to batch log
+ */
+function logBatch(message, type = 'info') {
+    const log = document.getElementById('batch-log');
+    const entry = document.createElement('div');
+    entry.className = `log-entry log-${type}`;
+    entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+    log.appendChild(entry);
+    log.scrollTop = log.scrollHeight;
+}
+
+/**
+ * Stop batch processing
+ */
+function stopBatch() {
+    if (batchEventSource) {
+        batchEventSource.close();
+        batchEventSource = null;
+    }
+    batchIsRunning = false;
+    document.getElementById('batch-start').disabled = batchSelectedImages.size === 0;
+    document.getElementById('batch-stop').disabled = true;
+    logBatch('Batch interrotto');
+
+    if (batchResults.length > 0) {
+        document.getElementById('batch-export-csv').disabled = false;
+    }
+}
+
+/**
+ * Finish batch processing
+ */
+function finishBatch() {
+    batchIsRunning = false;
+    document.getElementById('batch-start').disabled = batchSelectedImages.size === 0;
+    document.getElementById('batch-stop').disabled = true;
+    document.getElementById('batch-export-csv').disabled = batchResults.length === 0;
+
+    const totalDetections = batchResults.reduce((sum, r) => sum + r.count, 0);
+    logBatch(`Batch completato: ${batchResults.length} immagini, ${totalDetections} detections totali`, 'success');
+}
+
+/**
+ * Export batch results to CSV
+ */
+async function exportBatchCsv() {
+    if (batchResults.length === 0) return;
+
+    logBatch('Generazione CSV...');
+
+    try {
+        const response = await fetch('/api/export-batch-csv', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                results: batchResults
+            })
+        });
+
+        if (!response.ok) throw new Error('Export failed');
+
+        const blob = await response.blob();
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `batch_export_${new Date().toISOString().slice(0, 10)}.csv`;
+        a.click();
+        URL.revokeObjectURL(url);
+
+        logBatch('CSV esportato con successo', 'success');
+    } catch (error) {
+        console.error('Export error:', error);
+        logBatch('Errore esportazione CSV', 'error');
+    }
+}
+
+/**
+ * Initialize batch controls
+ */
+function initBatchControls() {
+    // Selection buttons
+    document.getElementById('batch-select-all').addEventListener('click', batchSelectAll);
+    document.getElementById('batch-select-none').addEventListener('click', batchSelectNone);
+    document.getElementById('batch-select-range').addEventListener('click', batchSelectRange);
+
+    // Action buttons
+    document.getElementById('batch-start').addEventListener('click', startBatch);
+    document.getElementById('batch-stop').addEventListener('click', stopBatch);
+    document.getElementById('batch-export-csv').addEventListener('click', exportBatchCsv);
+
+    // Confidence slider
+    const confidenceSlider = document.getElementById('batch-confidence');
+    const confidenceValue = document.getElementById('batch-confidence-value');
+    confidenceSlider.addEventListener('input', () => {
+        confidenceValue.textContent = (parseInt(confidenceSlider.value) / 100).toFixed(2);
+    });
+}
+
+// Initialize tabs and batch on DOM ready
+document.addEventListener('DOMContentLoaded', () => {
+    initTabs();
+    initBatchControls();
+});

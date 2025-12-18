@@ -955,6 +955,7 @@ async def detect_with_progress(image_name: str, classes: list[str], confidence: 
 
         for cls_config in classes:
             parsed = parse_csv_class(cls_config)
+            print(f"[DEBUG] Parsed class: {cls_config!r} -> {parsed}")
 
             label = parsed["label"]
             description = parsed["description"]
@@ -995,6 +996,9 @@ async def detect_with_progress(image_name: str, classes: list[str], confidence: 
         # Create reverse mapping: description -> label
         description_to_label = {v: k for k, v in label_to_description.items()}
 
+        print(f"[DEBUG] Detection classes for SAM3: {detection_classes}")
+        print(f"[DEBUG] Class thresholds: {class_thresholds}")
+
         # Step 2: Load model if needed
         yield {"type": "progress", "stage": "model", "message": "Caricamento modello SAM3...", "percent": 5}
         await asyncio.sleep(0.05)
@@ -1026,10 +1030,17 @@ async def detect_with_progress(image_name: str, classes: list[str], confidence: 
 
         # Step 3c: Calculate optimal tiles
         if tiles == 0:
-            # No tiling requested
-            optimal_tiles, opt_cols, opt_rows = 0, 1, 1
-        else:
+            # Auto: calculate optimal tiles based on image size
             optimal_tiles, opt_cols, opt_rows = calculate_optimal_tiles(width, height)
+        else:
+            # Use user-specified tile count
+            optimal_tiles = tiles
+            # Map tile count to layout
+            tile_layouts = {
+                6: (3, 2), 8: (4, 2), 9: (3, 3), 12: (4, 3),
+                16: (4, 4), 20: (5, 4), 24: (6, 4), 30: (6, 5)
+            }
+            opt_cols, opt_rows = tile_layouts.get(tiles, (6, 4))
 
         yield {
             "type": "progress",
@@ -1041,7 +1052,7 @@ async def detect_with_progress(image_name: str, classes: list[str], confidence: 
 
         all_detections = []
 
-        if tiles > 0:
+        if optimal_tiles > 0:
             # Step 4: Split into tiles (use optimal layout)
             yield {
                 "type": "progress",
@@ -1083,6 +1094,7 @@ async def detect_with_progress(image_name: str, classes: list[str], confidence: 
                     if "scores" in inference_state and len(inference_state["scores"]) > 0:
                         scores = inference_state["scores"]
                         boxes = inference_state["boxes"]
+                        print(f"[DEBUG] Tile {tile_idx+1}, class '{class_name}': {len(scores)} raw detections")
 
                         for i, score in enumerate(scores):
                             score_val = score.item() if hasattr(score, "item") else float(score)
@@ -1106,6 +1118,8 @@ async def detect_with_progress(image_name: str, classes: list[str], confidence: 
                                         y2_adj / original_height
                                     ]
                                 })
+                    else:
+                        print(f"[DEBUG] Tile {tile_idx+1}, class '{class_name}': no scores in inference_state")
         else:
             # Process whole image (no tiles)
             # OPTIMIZATION: Calculate backbone ONCE, reuse for all classes
@@ -1153,6 +1167,7 @@ async def detect_with_progress(image_name: str, classes: list[str], confidence: 
                                 ]
                             })
 
+        print(f"[DEBUG] Total raw detections before filtering: {len(all_detections)}")
         yield {
             "type": "progress",
             "stage": "detection_done",
@@ -1428,6 +1443,10 @@ async def detect_with_progress(image_name: str, classes: list[str], confidence: 
             }
 
         # Filter detections by per-class thresholds
+        print(f"[DEBUG] Before class threshold filter: {len(all_detections)} detections")
+        print(f"[DEBUG] class_thresholds keys: {list(class_thresholds.keys())}")
+        if all_detections:
+            print(f"[DEBUG] Sample detection class: {all_detections[0].get('class')}, original_class: {all_detections[0].get('original_class')}")
         if class_thresholds:
             filtered_detections = []
             for det in all_detections:
@@ -1442,6 +1461,7 @@ async def detect_with_progress(image_name: str, classes: list[str], confidence: 
                     filtered_detections.append(det)
                 elif det.get("score", 0) >= min_threshold:
                     filtered_detections.append(det)
+            print(f"[DEBUG] After class threshold filter: {len(filtered_detections)} detections")
             all_detections = filtered_detections
 
         # Sort by class name, then by score descending
@@ -1516,11 +1536,16 @@ class ClassListRequest(BaseModel):
 async def list_class_lists():
     """List all saved class lists."""
     lists = []
-    for file_path in CLASS_LISTS_DIR.glob("*.txt"):
-        lists.append({
-            "name": file_path.stem,
-            "file": file_path.name
-        })
+    seen = set()
+    # Load both .csv and .txt files, preferring .csv
+    for ext in ["*.csv", "*.txt"]:
+        for file_path in CLASS_LISTS_DIR.glob(ext):
+            if file_path.stem not in seen:
+                seen.add(file_path.stem)
+                lists.append({
+                    "name": file_path.stem,
+                    "file": file_path.name
+                })
     lists.sort(key=lambda x: x["name"])
     return {"lists": lists}
 
@@ -1528,7 +1553,10 @@ async def list_class_lists():
 @app.get("/api/class-lists/{list_name}")
 async def get_class_list(list_name: str):
     """Get a specific class list."""
-    file_path = CLASS_LISTS_DIR / f"{list_name}.txt"
+    # Try .csv first, then .txt
+    file_path = CLASS_LISTS_DIR / f"{list_name}.csv"
+    if not file_path.exists():
+        file_path = CLASS_LISTS_DIR / f"{list_name}.txt"
 
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="Class list not found")
@@ -1552,7 +1580,7 @@ async def save_class_list(request: ClassListRequest):
     if not safe_name:
         raise HTTPException(status_code=400, detail="Invalid list name")
 
-    file_path = CLASS_LISTS_DIR / f"{safe_name}.txt"
+    file_path = CLASS_LISTS_DIR / f"{safe_name}.csv"
 
     # Write classes to file
     content = "\n".join(request.classes)
@@ -1568,7 +1596,10 @@ async def save_class_list(request: ClassListRequest):
 @app.delete("/api/class-lists/{list_name}")
 async def delete_class_list(list_name: str):
     """Delete a class list."""
-    file_path = CLASS_LISTS_DIR / f"{list_name}.txt"
+    # Try .csv first, then .txt
+    file_path = CLASS_LISTS_DIR / f"{list_name}.csv"
+    if not file_path.exists():
+        file_path = CLASS_LISTS_DIR / f"{list_name}.txt"
 
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="Class list not found")
@@ -2254,6 +2285,262 @@ async def export_panoramas_batch(request: ExportPanoramasRequest):
             "Content-Disposition": f"attachment; filename={image_stem}_detections.csv"
         }
     )
+
+
+# ============ Batch Processing Endpoints ============
+
+@app.get("/api/batch-detect-stream")
+async def batch_detect_stream(
+    images: str = Query(...),
+    classes: str = Query(...),
+    confidence: float = Query(0.3),
+    tiles: int = Query(24),
+    mode: str = Query("sequential")
+):
+    """
+    Batch detection with SSE progress updates.
+    Processes multiple images sequentially or in parallel.
+    """
+    image_list = [img.strip() for img in images.split(",") if img.strip()]
+    class_list = [c.strip() for c in classes.split("\n") if c.strip()]
+
+    async def event_generator():
+        total = len(image_list)
+        print(f"[BATCH] Starting batch processing: {total} images, {len(class_list)} classes")
+
+        try:
+            for idx, image_name in enumerate(image_list):
+                print(f"[BATCH] Processing image {idx+1}/{total}: {image_name}")
+
+                # Signal start of image processing
+                yield {
+                    "event": "message",
+                    "data": json.dumps({
+                        "type": "start",
+                        "image": image_name,
+                        "index": idx,
+                        "total": total
+                    })
+                }
+
+                detections_list = []
+                had_error = False
+
+                try:
+                    # Clear CUDA cache before processing each image
+                    if torch.cuda.is_available():
+                        torch.cuda.empty_cache()
+                        torch.cuda.synchronize()
+
+                    # Process single image using existing detection logic
+                    async for progress in detect_with_progress(image_name, class_list, confidence, tiles):
+                        if progress.get("type") == "result":
+                            detections_list = progress.get("detections", [])
+                        elif progress.get("type") == "error":
+                            print(f"[BATCH] Error in detection: {progress.get('message')}")
+                            yield {
+                                "event": "message",
+                                "data": json.dumps({
+                                    "type": "error",
+                                    "image": image_name,
+                                    "error": progress.get("message", "Unknown error")
+                                })
+                            }
+                            had_error = True
+                            break  # Stop processing this image on error
+
+                    # Save detections to file (even if empty, to track processed images)
+                    csv_path = DETECTIONS_DIR / f"{Path(image_name).stem}.csv"
+                    if detections_list:
+                        save_detections_to_csv(image_name, detections_list, csv_path)
+
+                    # Signal completion (only if no error)
+                    if not had_error:
+                        print(f"[BATCH] Completed {image_name}: {len(detections_list)} detections")
+                        yield {
+                            "event": "message",
+                            "data": json.dumps({
+                                "type": "complete",
+                                "image": image_name,
+                                "count": len(detections_list),
+                                "detections": detections_list
+                            })
+                        }
+
+                except Exception as e:
+                    print(f"[BATCH] Exception processing {image_name}: {e}")
+                    import traceback
+                    traceback.print_exc()
+                    yield {
+                        "event": "message",
+                        "data": json.dumps({
+                            "type": "error",
+                            "image": image_name,
+                            "error": str(e)
+                        })
+                    }
+
+                # Clear CUDA cache after each image
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+            # Signal batch completion
+            print(f"[BATCH] Batch completed: {total} images processed")
+            yield {
+                "event": "message",
+                "data": json.dumps({"type": "done", "total": total})
+            }
+
+        except Exception as e:
+            print(f"[BATCH] Fatal error in batch generator: {e}")
+            import traceback
+            traceback.print_exc()
+            yield {
+                "event": "message",
+                "data": json.dumps({"type": "error", "image": "batch", "error": str(e)})
+            }
+
+    return EventSourceResponse(event_generator())
+
+
+def save_detections_to_csv(image_name: str, detections: list, csv_path: Path):
+    """Save detections to CSV file."""
+    import csv
+
+    # Get pose for geolocation
+    poses = get_poses()
+    pose = poses.get(image_name)
+
+    headers = [
+        'class', 'original_class', 'score', 'bbox_x1', 'bbox_y1', 'bbox_x2', 'bbox_y2',
+        'gps_lat', 'gps_lon', 'camera_lat', 'camera_lon', 'camera_heading',
+        'deep_analyzed', 'deep_result', 'local_analyzed', 'local_confidence',
+        'ocr_text', 'sign_class', 'tree_species', 'distance_m'
+    ]
+
+    with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+        writer = csv.DictWriter(f, fieldnames=headers)
+        writer.writeheader()
+
+        for det in detections:
+            bbox = det.get('bbox', [0, 0, 0, 0])
+            row = {
+                'class': det.get('class', ''),
+                'original_class': det.get('original_class', det.get('class', '')),
+                'score': f"{det.get('score', 0):.4f}",
+                'bbox_x1': int(bbox[0]) if len(bbox) > 0 else 0,
+                'bbox_y1': int(bbox[1]) if len(bbox) > 1 else 0,
+                'bbox_x2': int(bbox[2]) if len(bbox) > 2 else 0,
+                'bbox_y2': int(bbox[3]) if len(bbox) > 3 else 0,
+                'gps_lat': det.get('latitude', ''),
+                'gps_lon': det.get('longitude', ''),
+                'camera_lat': pose.latitude if pose else '',
+                'camera_lon': pose.longitude if pose else '',
+                'camera_heading': pose.heading if pose else '',
+                'deep_analyzed': det.get('deep_analyzed', False),
+                'deep_result': det.get('deep_result', ''),
+                'local_analyzed': det.get('local_analyzed', False),
+                'local_confidence': det.get('local_confidence', ''),
+                'ocr_text': det.get('ocr_text', ''),
+                'sign_class': det.get('sign_class', ''),
+                'tree_species': det.get('tree_species', ''),
+                'distance_m': det.get('distance_m', '')
+            }
+            writer.writerow(row)
+
+
+class BatchExportRequest(BaseModel):
+    """Request model for batch CSV export."""
+    results: list
+
+
+@app.post("/api/export-batch-csv")
+async def export_batch_csv(request: BatchExportRequest):
+    """
+    Export batch results to comprehensive CSV.
+    Includes all detection fields from batch processing.
+    """
+    import csv
+    from io import StringIO
+
+    poses = get_poses()
+
+    headers = [
+        'image', 'class', 'original_class', 'confidence',
+        'bbox_x1', 'bbox_y1', 'bbox_x2', 'bbox_y2',
+        'gps_lat', 'gps_lon', 'camera_lat', 'camera_lon', 'camera_altitude',
+        'camera_heading', 'camera_pitch', 'camera_roll',
+        'deep_analyzed', 'deep_result', 'local_analyzed', 'local_confidence',
+        'ocr_text', 'sign_class', 'tree_species', 'distance_m'
+    ]
+
+    rows = []
+    for result in request.results:
+        image_name = result.get('image', '')
+        pose = poses.get(image_name)
+
+        for det in result.get('detections', []):
+            bbox = det.get('bbox', [0, 0, 0, 0])
+            row = {
+                'image': Path(image_name).stem,
+                'class': det.get('class', ''),
+                'original_class': det.get('original_class', det.get('class', '')),
+                'confidence': f"{det.get('score', 0):.4f}",
+                'bbox_x1': int(bbox[0]) if len(bbox) > 0 else 0,
+                'bbox_y1': int(bbox[1]) if len(bbox) > 1 else 0,
+                'bbox_x2': int(bbox[2]) if len(bbox) > 2 else 0,
+                'bbox_y2': int(bbox[3]) if len(bbox) > 3 else 0,
+                'gps_lat': det.get('latitude', ''),
+                'gps_lon': det.get('longitude', ''),
+                'camera_lat': f"{pose.latitude:.8f}" if pose else '',
+                'camera_lon': f"{pose.longitude:.8f}" if pose else '',
+                'camera_altitude': f"{pose.altitude:.2f}" if pose else '',
+                'camera_heading': f"{pose.heading:.2f}" if pose else '',
+                'camera_pitch': f"{pose.pitch:.2f}" if pose else '',
+                'camera_roll': f"{pose.roll:.2f}" if pose else '',
+                'deep_analyzed': det.get('deep_analyzed', False),
+                'deep_result': det.get('deep_result', ''),
+                'local_analyzed': det.get('local_analyzed', False),
+                'local_confidence': det.get('local_confidence', ''),
+                'ocr_text': det.get('ocr_text', ''),
+                'sign_class': det.get('sign_class', ''),
+                'tree_species': det.get('tree_species', ''),
+                'distance_m': det.get('distance_m', '')
+            }
+            rows.append(row)
+
+    output = StringIO()
+    writer = csv.DictWriter(output, fieldnames=headers)
+    writer.writeheader()
+    writer.writerows(rows)
+
+    output.seek(0)
+    return StreamingResponse(
+        iter([output.getvalue()]),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": "attachment; filename=batch_export.csv"
+        }
+    )
+
+
+@app.get("/api/class-list/{list_name}")
+async def get_class_list_content(list_name: str):
+    """Get class list content for batch processing."""
+    # Try .csv first, then .txt
+    file_path = CLASS_LISTS_DIR / f"{list_name}.csv"
+    if not file_path.exists():
+        file_path = CLASS_LISTS_DIR / f"{list_name}.txt"
+
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Class list not found")
+
+    content = file_path.read_text().strip()
+
+    return {
+        "name": list_name,
+        "content": content
+    }
 
 
 @app.on_event("startup")

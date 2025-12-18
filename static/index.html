@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>SAM3 Object Detection</title>
+    <link rel="icon" href="data:,">
     <link rel="stylesheet" href="/static/style.css">
     <!-- Three.js for 3D viewer (detection modal only) -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
@@ -39,21 +40,108 @@
 
         <!-- Main Content -->
         <main class="content">
-            <div class="image-container" id="image-container">
-                <div class="placeholder" id="placeholder">
-                    <p>Select an image from the left sidebar</p>
+            <!-- Tab Bar -->
+            <div class="tab-bar">
+                <button class="tab-btn active" data-tab="detect">Detect</button>
+                <button class="tab-btn" data-tab="batch">Batch</button>
+            </div>
+
+            <!-- Tab: Detect (existing content) -->
+            <div class="tab-content active" id="tab-detect">
+                <div class="image-container" id="image-container">
+                    <div class="placeholder" id="placeholder">
+                        <p>Select an image from the left sidebar</p>
+                    </div>
+                    <img id="main-image" style="display: none;">
+                    <canvas id="overlay"></canvas>
                 </div>
-                <img id="main-image" style="display: none;">
-                <canvas id="overlay"></canvas>
+                <div class="image-info" id="image-info" style="display: none;">
+                    <span id="current-image-name"></span>
+                    <span id="current-image-size"></span>
+                </div>
+                <div class="detections-panel" id="detections-panel" style="display: none;">
+                    <h4>Detections <span id="detection-count">(0)</span></h4>
+                    <div class="detections-list" id="detections-list">
+                        <!-- Detections will be listed here -->
+                    </div>
+                </div>
             </div>
-            <div class="image-info" id="image-info" style="display: none;">
-                <span id="current-image-name"></span>
-                <span id="current-image-size"></span>
-            </div>
-            <div class="detections-panel" id="detections-panel" style="display: none;">
-                <h4>Detections <span id="detection-count">(0)</span></h4>
-                <div class="detections-list" id="detections-list">
-                    <!-- Detections will be listed here -->
+
+            <!-- Tab: Batch Processing -->
+            <div class="tab-content" id="tab-batch">
+                <div class="batch-container">
+                    <!-- Image Selection -->
+                    <div class="batch-section">
+                        <div class="batch-section-header">
+                            <h3>Selezione Immagini</h3>
+                            <div class="batch-controls">
+                                <button id="batch-select-all" class="batch-btn">Tutte</button>
+                                <button id="batch-select-none" class="batch-btn">Nessuna</button>
+                                <button id="batch-select-range" class="batch-btn">Range...</button>
+                                <span id="batch-selected-count" class="batch-count">0 selezionate</span>
+                            </div>
+                        </div>
+                        <div class="batch-image-grid" id="batch-image-grid">
+                            <!-- Thumbnails with checkboxes will be loaded here -->
+                        </div>
+                    </div>
+
+                    <!-- Configuration -->
+                    <div class="batch-section batch-config">
+                        <h3>Configurazione</h3>
+                        <div class="batch-config-grid">
+                            <div class="config-item">
+                                <label for="batch-class-list">Lista Classi</label>
+                                <select id="batch-class-list">
+                                    <option value="">-- Seleziona --</option>
+                                </select>
+                            </div>
+                            <div class="config-item">
+                                <label for="batch-confidence">Confidence</label>
+                                <div class="slider-row">
+                                    <input type="range" id="batch-confidence" min="10" max="90" value="30">
+                                    <span id="batch-confidence-value">0.30</span>
+                                </div>
+                            </div>
+                            <div class="config-item">
+                                <label for="batch-tiles">Tiles</label>
+                                <select id="batch-tiles">
+                                    <option value="0" selected>Auto</option>
+                                    <option value="6">6</option>
+                                    <option value="12">12</option>
+                                    <option value="24">24</option>
+                                </select>
+                            </div>
+                            <div class="config-item">
+                                <label for="batch-mode">Modalità</label>
+                                <select id="batch-mode">
+                                    <option value="sequential">Sequenziale</option>
+                                    <option value="parallel">Parallelo</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Actions & Progress -->
+                    <div class="batch-section batch-actions-section">
+                        <div class="batch-actions">
+                            <button id="batch-start" class="batch-btn primary" disabled>Avvia Batch</button>
+                            <button id="batch-stop" class="batch-btn danger" disabled>Stop</button>
+                            <button id="batch-export-csv" class="batch-btn export" disabled>Esporta CSV</button>
+                        </div>
+                        <div class="batch-progress" id="batch-progress" style="display: none;">
+                            <div class="progress-bar">
+                                <div class="progress-fill" id="batch-progress-fill"></div>
+                            </div>
+                            <div class="progress-info">
+                                <span id="batch-progress-text">0/0 immagini</span>
+                                <span id="batch-progress-percent">0%</span>
+                            </div>
+                        </div>
+                        <div class="batch-log" id="batch-log">
+                            <!-- Log messages will appear here -->
+                        </div>
+                    </div>
                 </div>
             </div>
         </main>
