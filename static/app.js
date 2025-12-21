@@ -2586,12 +2586,12 @@ function finishBatch() {
 }
 
 /**
- * Export batch results to CSV
+ * Export batch results to ZIP (contains raw detections CSV + triangulated objects CSV)
  */
 async function exportBatchCsv() {
     if (batchResults.length === 0) return;
 
-    logBatch('Generazione CSV...');
+    logBatch('Generazione ZIP (detections_raw.csv + objects_triangulated.csv)...');
 
     try {
         const response = await fetch('/api/export-batch-csv', {
@@ -2608,14 +2608,14 @@ async function exportBatchCsv() {
         const url = URL.createObjectURL(blob);
         const a = document.createElement('a');
         a.href = url;
-        a.download = `batch_export_${new Date().toISOString().slice(0, 10)}.csv`;
+        a.download = `batch_export_${new Date().toISOString().slice(0, 10)}.zip`;
         a.click();
         URL.revokeObjectURL(url);
 
-        logBatch('CSV esportato con successo', 'success');
+        logBatch('ZIP esportato con successo (2 CSV)', 'success');
     } catch (error) {
         console.error('Export error:', error);
-        logBatch('Errore esportazione CSV', 'error');
+        logBatch('Errore esportazione ZIP', 'error');
     }
 }
 
