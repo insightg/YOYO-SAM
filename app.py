@@ -165,7 +165,8 @@ def parse_csv_class(csv_line: str) -> dict:
 
 def parse_legacy_class(class_str: str) -> dict:
     """Fallback per formato legacy (30 road sign - GTSRB)"""
-    from local_analyze import parse_threshold_prefix, is_local_class
+    from utils import parse_threshold_prefix
+    from local_analyze import is_local_class
     from deep_analyze import is_deep_class
 
     name, threshold = parse_threshold_prefix(class_str)

@@ -11,6 +11,8 @@ from PIL import Image
 from pathlib import Path
 from typing import Optional
 
+from utils import crop_detection, parse_threshold_prefix
+
 # Global model cache (full precision)
 _model = None
 _processor = None
@@ -211,24 +213,6 @@ DO NOT add explanations, only the subtype identifier.
 What is the specific subtype of this {category}?"""
 
     return prompt
-
-
-def crop_detection(image: Image.Image, bbox: list, padding_percent: float = 0.1) -> Image.Image:
-    """Crop the detection area from the image with optional padding."""
-    x1, y1, x2, y2 = bbox
-    width = x2 - x1
-    height = y2 - y1
-
-    # Add padding
-    pad_x = width * padding_percent
-    pad_y = height * padding_percent
-
-    x1 = max(0, x1 - pad_x)
-    y1 = max(0, y1 - pad_y)
-    x2 = min(image.width, x2 + pad_x)
-    y2 = min(image.height, y2 + pad_y)
-
-    return image.crop((int(x1), int(y1), int(x2), int(y2)))
 
 
 def clean_response(response: str) -> str:
@@ -440,8 +424,6 @@ def is_qwen_class(class_name: str) -> tuple[bool, str, float | None]:
     Returns:
         (is_qwen, base_class_name, threshold_or_none)
     """
-    from local_analyze import parse_threshold_prefix
-
     name, threshold = parse_threshold_prefix(class_name)
 
     if name.lower().endswith("- qwen"):

@@ -15,6 +15,8 @@ from PIL import Image
 from pathlib import Path
 from typing import Optional
 
+from utils import crop_detection
+
 # Global model cache
 _model = None
 _device = None
@@ -48,24 +50,6 @@ def get_rdd_model():
         print(f"RDD YOLOv8 model loaded on {_device}")
 
     return _model, _device
-
-
-def crop_detection(image: Image.Image, bbox: list, padding_percent: float = 0.1) -> Image.Image:
-    """Crop the detection area from the image with optional padding."""
-    x1, y1, x2, y2 = bbox
-    width = x2 - x1
-    height = y2 - y1
-
-    # Add padding
-    pad_x = width * padding_percent
-    pad_y = height * padding_percent
-
-    x1 = max(0, x1 - pad_x)
-    y1 = max(0, y1 - pad_y)
-    x2 = min(image.width, x2 + pad_x)
-    y2 = min(image.height, y2 + pad_y)
-
-    return image.crop((int(x1), int(y1), int(x2), int(y2)))
 
 
 def classify_crack(image: Image.Image) -> tuple[str, float]:

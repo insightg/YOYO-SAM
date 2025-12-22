@@ -9,6 +9,8 @@ import torch
 from PIL import Image
 from pathlib import Path
 
+from utils import crop_detection
+
 # Global model cache
 _reader = None
 
@@ -23,20 +25,6 @@ def get_ocr_reader():
         _reader = easyocr.Reader(['en'], gpu=False)
         print("EasyOCR loaded (CPU mode)")
     return _reader
-
-
-def crop_detection(image: Image.Image, bbox: list, padding: float = 0.1) -> Image.Image:
-    """Crop detection area with padding."""
-    x1, y1, x2, y2 = bbox
-    w, h = x2 - x1, y2 - y1
-    pad_x, pad_y = w * padding, h * padding
-
-    x1 = max(0, x1 - pad_x)
-    y1 = max(0, y1 - pad_y)
-    x2 = min(image.width, x2 + pad_x)
-    y2 = min(image.height, y2 + pad_y)
-
-    return image.crop((int(x1), int(y1), int(x2), int(y2)))
 
 
 def extract_text(image: Image.Image) -> tuple[str, float]:
